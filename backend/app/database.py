@@ -121,6 +121,33 @@ class Store:
                     missing_ok=True
                 )
 
+    def report_jobs(self):
+        with self.lock:
+            self.available()
+            if self.collection is not None:
+                return list(self.collection.database.report_jobs.find({}, {"_id": 0}))
+            return [json.loads(p.read_text(encoding="utf-8"))
+                    for p in (self.settings.storage_dir / "jobs").glob("*.json")]
+
+    def save_report_job(self, job):
+        with self.lock:
+            self.available()
+            if self.collection is not None:
+                self.collection.database.report_jobs.replace_one({"id": job["id"]}, deepcopy(job), upsert=True)
+            else:
+                path = self.settings.storage_dir / "jobs" / f"{job['id']}.json"
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(job, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+                os.replace(tmp, path)
+
+    def delete_report_job(self, job_id):
+        with self.lock:
+            self.available()
+            if self.collection is not None:
+                self.collection.database.report_jobs.delete_one({"id": job_id})
+            else:
+                (self.settings.storage_dir / "jobs" / f"{job_id}.json").unlink(missing_ok=True)
+
     def close(self):
         if self.client is not None:
             self.client.close()

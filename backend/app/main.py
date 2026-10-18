@@ -6,15 +6,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from . import audio
+from . import audio, separation
+from .markdown import render_markdown
+from .project import upgrade_project
 from .config import Settings
 from .database import Store
-from .reports import ai_report, evidence, measured_report
+from .reports import evidence
+from .report_queue import ReportQueue
 from .ui import register_ui
 
 log = logging.getLogger(__name__)
@@ -36,12 +40,24 @@ class TransformInput(BaseModel):
     semitones: float = Field(default=0, ge=-12, le=12)
     speed: float = Field(default=1, ge=0.5, le=2)
     normalize: bool = True
+    vocal_id: str | None = None
 
 
 class ReportInput(BaseModel):
     start: float = Field(default=0, ge=0)
     end: float = Field(gt=0)
     ai: bool = False
+    enqueue: bool = False
+    source_ids: list[str] | None = None
+    vocal_id: str | None = None
+
+
+class SeparationInput(BaseModel):
+    model: Literal["htdemucs", "htdemucs_6s"] = "htdemucs"
+
+
+class VocalInput(BaseModel):
+    vocal_id: str | None = None
 
 
 def create_app(settings=None):
@@ -50,19 +66,27 @@ def create_app(settings=None):
     store = Store(s)
     jobs = {}
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vocal-worker")
+    report_queue = ReportQueue(store, s, pool)
 
     @asynccontextmanager
     async def lifespan(app):
         store.connect()
         if not store.error:
             for project in store.list():
+                upgrade_project(project)
                 for t in project["tracks"]:
+                    if t.get("separation_status") in ("queued", "processing"):
+                        t.update(separation_status="failed", error="서버 재시작으로 분리가 중단되었습니다. 다시 시도하세요.")
+                    for v in t.get("stems", []):
+                        if v["status"] in ("queued", "processing"):
+                            v.update(status="failed", error="서버 재시작으로 분석이 중단되었습니다. 다시 분석하세요.")
                     if t["status"] in ("queued", "processing"):
                         t.update(
                             status="failed",
                             error="서버가 재시작되어 작업이 중단되었습니다. 다시 분석하세요.",
                         )
                 store.save(project)
+            report_queue.recover()
         yield
         pool.shutdown(wait=True, cancel_futures=True)
         store.close()
@@ -70,6 +94,7 @@ def create_app(settings=None):
     app = FastAPI(title="Music Analysis Studio", lifespan=lifespan)
     app.state.store = store
     app.state.jobs = jobs
+    app.state.report_queue = report_queue
 
     allowed_hosts = {"127.0.0.1", "localhost", "testserver", "::1"} | {
         h.strip().lower() for h in s.allowed_hosts.split(",") if h.strip()
@@ -128,75 +153,123 @@ def create_app(settings=None):
             project["updated_at"] = now()
             store.save(project)
 
-    def submit(pid, tid, transform_args=None, source_id=None):
+    def stem_path(stem):
+        return s.storage_dir / "audio" / stem["file"]
+
+    def vocal_or_409(pid, sid, vocal_id=None):
+        project, source = track_or_404(pid, sid)
+        vocal = next((t for t in source.get("stems", [])
+                      if t["kind"] == "vocals" and (not vocal_id or t["id"] == vocal_id)), None)
+        if not vocal or not stem_path(vocal).is_file():
+            raise HTTPException(409, "먼저 음악에서 보컬을 분리하세요.")
+        return project, source, vocal
+
+    def update_stem(pid, sid, vid, **values):
+        with store.lock:
+            project, source = track_or_404(pid, sid)
+            stem = next(t for t in source["stems"] if t["id"] == vid)
+            stem.update(values)
+            project["updated_at"] = now()
+            store.save(project)
+
+    def new_job(pid, sid, task, vid=None):
         jid = uuid4().hex
-        jobs[jid] = {
-            "id": jid,
-            "project_id": pid,
-            "track_id": tid,
-            "status": "queued",
-            "progress": 0,
-            "message": "분석 대기",
-        }
-        update_track(pid, tid, job_id=jid, status="queued", error=None)
+        jobs[jid] = {"id": jid, "project_id": pid, "track_id": sid, "stem_id": vid,
+                     "task": task, "status": "queued", "progress": 0, "message": "작업 대기"}
+        return jid, jobs[jid]
 
+    def submit_separation(pid, sid, model_name=None):
+        jid, job = new_job(pid, sid, "separation")
+        update_track(pid, sid, job_id=jid, separation_status="queued", error=None)
         def work():
-            job = jobs[jid]
-
-            def progress(value, message):
-                job.update(progress=value, message=message)
-
-            job.update(status="processing", progress=5, message="오디오 준비")
-            target = s.storage_dir / "audio" / f"{tid}.wav"
+            job.update(status="processing", progress=5, message="원본 음악 준비")
+            target = s.storage_dir / "audio" / f"{sid}-original.wav"
+            def progress(percent, message):
+                job.update(progress=percent, message=message)
             try:
-                _, track = track_or_404(pid, tid)
-                update_track(pid, tid, status="processing")
-                if transform_args:
-                    metadata = audio.transform(
-                        s.storage_dir / "audio" / f"{source_id}.wav",
-                        target,
-                        **transform_args,
-                        max_duration=s.max_duration_seconds,
-                    )
-                elif not target.exists():
-                    metadata = audio.decode(
-                        s.storage_dir / "uploads" / track["stored_name"],
-                        target,
-                        s.max_duration_seconds,
-                    )
-                else:
-                    metadata = {}
-                update_track(pid, tid, **metadata)
-                data, cache_hit = audio.cached_analysis(
-                    target, s.storage_dir / "cache", s.max_duration_seconds, progress
-                )
-                analysis_path(track).write_text(
-                    json.dumps(data, ensure_ascii=False, allow_nan=False),
-                    encoding="utf-8",
-                )
-                update_track(
-                    pid,
-                    tid,
-                    status="ready",
-                    cache_hit=cache_hit,
-                    summary=data["summary"],
-                )
-                job.update(status="done", progress=100, message="분석 완료")
-            except Exception as exc:
-                log.exception("Audio job %s failed", jid)
-                message = (
-                    str(exc)
-                    if isinstance(exc, ValueError)
-                    else "처리 실패. 파일 형식·저장 공간을 확인하고 서버 로그를 참고하세요."
-                )
+                _, source = track_or_404(pid, sid)
+                update_track(pid, sid, separation_status="processing")
+                if not target.is_file():
+                    raw = s.storage_dir / "uploads" / source.get("stored_name", "_missing")
+                    if not raw.is_file():
+                        raw = s.storage_dir / "audio" / source.get("original_file", "_missing")
+                    metadata = separation.prepare_original(raw, target, s.max_duration_seconds)
+                    update_track(pid, sid, **metadata, original_file=target.name, status="ready")
+                model = model_name or source.get("separation_model", s.separation_model)
+                output_dir = s.storage_dir / "audio" / f"{sid}-{jid}"
+                stems = separation.separate(target, output_dir, model, s.separation_device,
+                                            s.storage_dir / "models", progress)
+                for stem in stems:
+                    stem.update(id=uuid4().hex, source_id=sid, file=f"{sid}-{jid}/{stem['kind']}.wav",
+                                status="pending" if stem["kind"] == "vocals" else "ready", offset=0)
+                # Keep existing stems and analysis until a replacement fully succeeds.
+                with store.lock:
+                    project, current = track_or_404(pid, sid)
+                    previous_stems = current.get("stems", [])
+                    current.update(stems=stems, separation_status="ready", separation_model=model,
+                                   status="ready", error=None)
+                    project["reports"] = [r for r in project.get("reports", [])
+                        if not any(e.get("source_id") == sid or e["track_id"] in {t["id"] for t in source.get("stems", [])}
+                                   for e in r["evidence"])]
+                    project["updated_at"] = now()
+                    store.save(project)
+                    report_queue.forget(pid, sid)
+                # Metadata now points to the new files; cleanup must not invalidate them.
                 try:
-                    update_track(pid, tid, status="failed", error=message)
-                except Exception:
-                    log.exception("Could not save failed job")
+                    for old in previous_stems:
+                        analysis_path(old).unlink(missing_ok=True)
+                        if stem_path(old).parent != s.storage_dir / "audio":
+                            stem_path(old).unlink(missing_ok=True)
+                            try:
+                                stem_path(old).parent.rmdir()
+                            except OSError:
+                                pass
+                    prune_cache()
+                except OSError:
+                    log.warning("Old separation files could not be fully cleaned up: %s", sid, exc_info=True)
+                job.update(status="done", progress=100, message="보컬 · 악기 분리 완료")
+            except Exception as exc:
+                temporary = s.storage_dir / "audio" / f"{sid}-{jid}"
+                if temporary.is_dir():
+                    for path in temporary.glob("*.wav"):
+                        path.unlink(missing_ok=True)
+                    temporary.rmdir()
+                log.exception("Source separation failed: %s", jid)
+                message = str(exc) if isinstance(exc, ValueError) else "음원 분리 실패. 모델 다운로드, GPU 메모리 및 서버 로그를 확인하고 다시 시도하세요."
+                _, current = track_or_404(pid, sid)
+                update_track(pid, sid, separation_status="failed", status="ready" if current.get("duration") else "failed", error=message)
                 job.update(status="failed", message=message)
-
         pool.submit(work)
-        return jobs[jid]
+        return job
+
+    def submit_analysis(pid, sid, vid, transform_args=None):
+        jid, job = new_job(pid, sid, "vocal-analysis", vid)
+        update_stem(pid, sid, vid, status="queued", job_id=jid, error=None)
+        def work():
+            job.update(status="processing", progress=10, message="분리된 보컬 분석")
+            def progress(percent, message):
+                job.update(progress=percent, message=message)
+            try:
+                _, source = track_or_404(pid, sid)
+                vocal = next(t for t in source["stems"] if t["id"] == vid)
+                update_stem(pid, sid, vid, status="processing")
+                if transform_args:
+                    original = next(t for t in source["stems"] if t["id"] == vocal["parent_stem_id"])
+                    metadata = audio.transform(stem_path(original), stem_path(vocal),
+                                               **transform_args, max_duration=s.max_duration_seconds)
+                    update_stem(pid, sid, vid, **metadata, waveform=separation.waveform(stem_path(vocal)))
+                data, cache_hit = audio.cached_analysis(stem_path(vocal), s.storage_dir / "cache",
+                                                       s.max_duration_seconds, progress)
+                analysis_path(vocal).write_text(json.dumps(data, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+                update_stem(pid, sid, vid, status="ready", cache_hit=cache_hit, summary=data["summary"])
+                job.update(status="done", progress=100, message="보컬 분석 완료")
+            except Exception as exc:
+                log.exception("Vocal analysis failed: %s", jid)
+                message = str(exc) if isinstance(exc, ValueError) else "보컬 분석 실패. 파일과 서버 로그를 확인하세요."
+                update_stem(pid, sid, vid, status="failed", error=message)
+                job.update(status="failed", message=message)
+        pool.submit(work)
+        return job
 
     @app.get("/api/health")
     def health():
@@ -212,6 +285,9 @@ def create_app(settings=None):
             "storage": str(s.storage_dir),
             "max_upload_mb": s.max_upload_mb,
             "max_duration_seconds": s.max_duration_seconds,
+            "separation_available": separation.available(),
+            "separation_model": s.separation_model,
+            "separation_device": s.separation_device,
         }
 
     @app.get("/api/projects")
@@ -222,7 +298,8 @@ def create_app(settings=None):
     def new_project(data: ProjectInput):
         p = {
             "id": uuid4().hex,
-            "name": data.name.strip() or "새 보컬 프로젝트",
+            "name": data.name.strip() or "새 음악 프로젝트",
+            "schema_version": 2,
             "created_at": now(),
             "updated_at": now(),
             "tracks": [],
@@ -238,28 +315,40 @@ def create_app(settings=None):
     def rename(pid: str, data: ProjectInput):
         with store.lock:
             p = project_or_404(pid)
-            p.update(name=data.name.strip() or "새 보컬 프로젝트", updated_at=now())
+            p.update(name=data.name.strip() or "새 음악 프로젝트", updated_at=now())
             store.save(p)
             return p
 
-    def delete_files(track):
-        for path in [
-            s.storage_dir / "audio" / f"{track['id']}.wav",
-            analysis_path(track),
-            s.storage_dir / "uploads" / track.get("stored_name", "_missing"),
-        ]:
-            path.unlink(missing_ok=True)
+    def delete_files(source):
+        parents = set()
+        for stem in source.get("stems", []):
+            parents.add(stem_path(stem).parent)
+            stem_path(stem).unlink(missing_ok=True)
+            analysis_path(stem).unlink(missing_ok=True)
+        for parent in parents:
+            if parent != s.storage_dir / "audio":
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+        for filename in {source.get("original_file", "_missing"), f"{source['id']}-original.wav"}:
+            (s.storage_dir / "audio" / filename).unlink(missing_ok=True)
+        (s.storage_dir / "uploads" / source.get("stored_name", "_missing")).unlink(missing_ok=True)
+        directory = s.storage_dir / "audio" / source["id"]
+        if directory.is_dir():
+            for path in directory.glob("*.wav"):
+                path.unlink()
+            directory.rmdir()
 
     def busy(p):
-        return any(t["status"] in ("queued", "processing") for t in p["tracks"])
+        return report_queue.has_pending(p["id"]) or any(t.get("separation_status") in ("queued", "processing") or
+                   any(v["status"] in ("queued", "processing") for v in t.get("stems", []))
+                   for t in p["tracks"])
 
     def prune_cache():
-        used = set()
-        for p in store.list():
-            for t in p["tracks"]:
-                path = s.storage_dir / "audio" / f"{t['id']}.wav"
-                if path.exists():
-                    used.add(f"{audio.ENGINE}-{audio.pcm_digest(path)}.json")
+        used = {f"{audio.ENGINE}-{audio.pcm_digest(stem_path(v))}.json"
+                for p in store.list() for t in p["tracks"] for v in t.get("stems", [])
+                if v["kind"] == "vocals" and stem_path(v).is_file()}
         for path in (s.storage_dir / "cache").glob(f"{audio.ENGINE}-*.json"):
             if path.name not in used:
                 path.unlink(missing_ok=True)
@@ -273,6 +362,7 @@ def create_app(settings=None):
             for t in p["tracks"]:
                 delete_files(t)
             store.delete(pid)
+            report_queue.forget(pid)
             prune_cache()
 
     @app.post("/api/projects/{pid}/tracks", status_code=202)
@@ -299,7 +389,7 @@ def create_app(settings=None):
                 p = project_or_404(pid)
                 if len(p["tracks"]) >= 3:
                     raise HTTPException(
-                        409, "한 프로젝트에서 최대 3개 트랙을 비교할 수 있습니다."
+                        409, "한 프로젝트에는 원본 음악을 최대 3개까지 넣을 수 있습니다."
                     )
                 track = {
                     "id": tid,
@@ -309,6 +399,9 @@ def create_app(settings=None):
                     "stored_name": target.name,
                     "sha256": audio.digest(target),
                     "status": "queued",
+                    "separation_status": "queued",
+                    "separation_model": s.separation_model,
+                    "stems": [],
                     "duration": 0,
                     "offset": 0,
                     "size": size,
@@ -317,7 +410,7 @@ def create_app(settings=None):
                 p["tracks"].append(track)
                 p["updated_at"] = now()
                 store.save(p)
-                job = submit(pid, tid)
+                job = submit_separation(pid, tid)
             return {"track": track, "job": job}
         except Exception:
             target.unlink(missing_ok=True)
@@ -341,62 +434,77 @@ def create_app(settings=None):
             p["reports"] = [
                 r
                 for r in p.get("reports", [])
-                if not any(e["track_id"] == tid for e in r["evidence"])
+                if not any(e.get("source_id") == tid or e["track_id"] in {v["id"] for v in t.get("stems", [])} for e in r["evidence"])
             ]
             p["updated_at"] = now()
             store.save(p)
+            report_queue.forget(pid, tid)
             prune_cache()
 
-    @app.post("/api/projects/{pid}/tracks/{tid}/analyze", status_code=202)
-    def retry(pid: str, tid: str):
+    @app.post("/api/projects/{pid}/tracks/{tid}/separate", status_code=202)
+    def separate_source(pid: str, tid: str, data: SeparationInput):
         with store.lock:
-            _, track = track_or_404(pid, tid)
-            if track["status"] in ("queued", "processing"):
+            p, source = track_or_404(pid, tid)
+            if busy(p):
+                raise HTTPException(409, "진행 중인 작업이 완료된 후 다시 시도하세요.")
+            return submit_separation(pid, tid, data.model)
+
+    @app.post("/api/projects/{pid}/tracks/{tid}/analyze", status_code=202)
+    def analyze_vocal(pid: str, tid: str, data: VocalInput = VocalInput()):
+        with store.lock:
+            _, source, vocal = vocal_or_409(pid, tid, data.vocal_id)
+            if source.get("separation_status") in ("queued", "processing") or vocal["status"] in ("queued", "processing"):
                 raise HTTPException(409, "이미 처리 중입니다.")
-            params = (
-                track.get("transform")
-                if not (s.storage_dir / "audio" / f"{tid}.wav").exists()
-                else None
-            )
-            return submit(pid, tid, params, track.get("source_id"))
+            return submit_analysis(pid, tid, vocal["id"])
 
     @app.post("/api/projects/{pid}/tracks/{tid}/transform", status_code=202)
     def transform(pid: str, tid: str, data: TransformInput):
         with store.lock:
-            p, source = track_or_404(pid, tid)
-            if source["status"] != "ready":
-                raise HTTPException(409, "분석이 완료된 트랙만 변형할 수 있습니다.")
-            if len(p["tracks"]) >= 3:
-                raise HTTPException(
-                    409, "변형본을 추가하려면 트랙 슬롯 하나를 비워주세요."
-                )
-            new_id = uuid4().hex
-            track = {
-                "id": new_id,
-                "name": f"변형 · {source['name']}"[:180],
-                "source_id": tid,
-                "transform": data.model_dump(),
-                "status": "queued",
-                "duration": 0,
-                "offset": source.get("offset", 0),
-                "created_at": now(),
-                "size": 0,
-            }
-            p["tracks"].append(track)
-            p["updated_at"] = now()
+            p, source, vocal = vocal_or_409(pid, tid, data.vocal_id)
+            if vocal["status"] != "ready":
+                raise HTTPException(409, "분석이 완료된 보컬만 변형할 수 있습니다.")
+            if len(source["stems"]) >= 12:
+                raise HTTPException(409, "음원당 최대 12개 트랙까지 지원합니다.")
+            vid = uuid4().hex
+            variant = {"id": vid, "source_id": tid, "parent_stem_id": vocal["id"], "derived": True,
+                       "kind": "vocals", "name": f"변형 보컬 ({data.semitones:+g}반음 · {data.speed:g}×)",
+                       "file": f"{tid}/{vid}.wav", "status": "queued", "duration": 0, "offset": 0,
+                       "transform": data.model_dump(exclude={"vocal_id"})}
+            (s.storage_dir / "audio" / tid).mkdir(exist_ok=True)
+            source["stems"].append(variant)
             store.save(p)
-            return {"track": track, "job": submit(pid, new_id, data.model_dump(), tid)}
+            job = submit_analysis(pid, tid, vid, variant["transform"])
+            return {"track": variant, "job": job}
+
+    @app.get("/api/projects/{pid}/tracks/{tid}/stems/{vid}/audio")
+    def stem_audio(pid: str, tid: str, vid: str):
+        _, source = track_or_404(pid, tid)
+        stem = next((v for v in source.get("stems", []) if v["id"] == vid), None)
+        if not stem or not stem_path(stem).is_file():
+            raise HTTPException(404, "분리 트랙이 없습니다.")
+        return FileResponse(stem_path(stem), media_type="audio/wav", filename=f"{stem['kind']}.wav")
+
+    @app.get("/api/projects/{pid}/tracks/{tid}/stems/{vid}/analysis")
+    def stem_analysis(pid: str, tid: str, vid: str):
+        _, _, vocal = vocal_or_409(pid, tid, vid)
+        if vocal["status"] != "ready" or not analysis_path(vocal).is_file():
+            raise HTTPException(409, "보컬 분석을 먼저 실행하세요.")
+        return json.loads(analysis_path(vocal).read_text(encoding="utf-8"))
+
+    @app.get("/api/report-jobs")
+    def report_jobs():
+        return report_queue.snapshot()
 
     @app.get("/api/jobs/{jid}")
     def job(jid: str):
         if jid not in jobs:
-            raise HTTPException(404, "작업 정보를 찾을 수 없습니다.")
+            return report_queue.get(jid)
         return jobs[jid]
 
     @app.get("/api/projects/{pid}/tracks/{tid}/audio")
     def get_audio(pid: str, tid: str):
         _, track = track_or_404(pid, tid)
-        path = s.storage_dir / "audio" / f"{track['id']}.wav"
+        path = s.storage_dir / "audio" / track.get("original_file", "_missing")
         if not path.exists() or track["status"] != "ready":
             raise HTTPException(409, "오디오 준비 중입니다.")
         return FileResponse(path, media_type="audio/wav", filename=f"{tid}.wav")
@@ -411,75 +519,56 @@ def create_app(settings=None):
 
     @app.get("/api/projects/{pid}/tracks/{tid}/analysis")
     def get_analysis(pid: str, tid: str):
-        _, track = track_or_404(pid, tid)
-        if track["status"] != "ready" or not analysis_path(track).exists():
-            raise HTTPException(409, "분석이 아직 완료되지 않았습니다.")
-        return json.loads(analysis_path(track).read_text(encoding="utf-8"))
+        _, _, vocal = vocal_or_409(pid, tid)
+        if vocal["status"] != "ready" or not analysis_path(vocal).is_file():
+            raise HTTPException(409, "보컬 분석을 먼저 실행하세요.")
+        return json.loads(analysis_path(vocal).read_text(encoding="utf-8"))
+
+    @app.get("/api/projects/{pid}/reports/{index}")
+    def saved_report(pid: str, index: int):
+        reports = project_or_404(pid).get("reports", [])
+        if index < 0 or index >= len(reports):
+            raise HTTPException(404, "리포트가 없습니다.")
+        report = dict(reports[index])
+        report["content_html"] = render_markdown(report["content"])
+        return report
 
     @app.post("/api/projects/{pid}/reports", status_code=202)
     def report(pid: str, data: ReportInput):
-        p = project_or_404(pid)
-        if data.end <= data.start:
-            raise HTTPException(422, "구간 끝은 시작보다 커야 합니다.")
-        analyses = {
-            t["id"]: json.loads(analysis_path(t).read_text(encoding="utf-8"))
-            for t in p["tracks"]
-            if t["status"] == "ready"
-        }
-        items = evidence(p["tracks"], analyses, data.start, data.end)
-        if not items:
-            raise HTTPException(409, "선택 구간에 분석 데이터가 없습니다.")
-        if data.ai and not (s.ai_url and s.ai_model):
-            raise HTTPException(
-                409,
-                "AI 미설정: .env에서 MAS_AI_URL, MAS_AI_MODEL 및 필요 시 API 키를 설정하세요.",
-            )
-        jid = uuid4().hex
-        jobs[jid] = {
-            "id": jid,
-            "status": "queued",
-            "progress": 0,
-            "message": "리포트 생성 대기",
-        }
-
-        def work():
-            jobs[jid].update(
-                status="processing",
-                progress=25,
-                message="AI 평가 중" if data.ai else "측정 리포트 작성 중",
-            )
-            try:
-                content = (
-                    ai_report(s, items)
-                    if data.ai
-                    else measured_report(items, data.start, data.end)
+        with store.lock:
+            p = project_or_404(pid)
+            if data.end <= data.start:
+                raise HTTPException(422, "구간 끝은 시작보다 커야 합니다.")
+            vocals = []
+            for source in p["tracks"]:
+                if data.source_ids is not None and source["id"] not in data.source_ids:
+                    continue
+                if source.get("separation_status") in ("queued", "processing"):
+                    raise HTTPException(409, "선택 음원의 분리 작업 완료 후 리포트를 요청하세요.")
+                for vocal in source.get("stems", []):
+                    if vocal["kind"] != "vocals" or vocal["status"] != "ready":
+                        continue
+                    if data.vocal_id and vocal["id"] != data.vocal_id:
+                        continue
+                    if not data.vocal_id and vocal.get("derived"):
+                        continue
+                    vocals.append({**vocal, "name": source["name"] + " · " + vocal["name"],
+                                   "source_id": source["id"], "offset": 0 if data.vocal_id else source.get("offset", 0)})
+            analyses = {v["id"]: json.loads(analysis_path(v).read_text(encoding="utf-8"))
+                        for v in vocals if analysis_path(v).is_file()}
+            items = evidence(vocals, analyses, data.start, data.end)
+            if not items:
+                raise HTTPException(409, "선택 구간에 분석 데이터가 없습니다.")
+            if data.source_ids and len(data.source_ids) > 1 and len(items) < 2:
+                raise HTTPException(409, "비교하려면 최소 두 음원의 보컬 분석을 완료하세요.")
+            if data.ai and not (s.ai_url and s.ai_model):
+                raise HTTPException(
+                    409,
+                    "AI 미설정: .env에서 MAS_AI_URL, MAS_AI_MODEL 및 필요 시 API 키를 설정하세요.",
                 )
-                result = {
-                    "content": content,
-                    "evidence": items,
-                    "kind": "ai" if data.ai else "measured",
-                    "model": s.ai_model if data.ai else None,
-                    "created_at": now(),
-                }
-                with store.lock:
-                    current = store.get(pid)
-                    if current is not None:
-                        current["reports"] = (current.get("reports", []) + [result])[
-                            -10:
-                        ]
-                        store.save(current)
-                jobs[jid].update(status="done", progress=100, result=result)
-            except Exception:
-                log.exception("Report failed")
-                jobs[jid].update(
-                    status="failed",
-                    message="AI 제공자 연결·인증·응답 오류입니다. .env의 URL, 모델, API 키를 확인하세요.",
-                )
+            return report_queue.submit(p, items, data.start, data.end, data.ai, data.enqueue)
 
-        pool.submit(work)
-        return jobs[jid]
-
-    register_ui(app, store, health)
+    register_ui(app, store, health, report_queue.snapshot)
 
     return app
 

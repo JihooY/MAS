@@ -42,8 +42,10 @@ export class ComparisonChart {
     });
     this.series = series;
     const values = series.flatMap(s => s.points.map(p => p.value)).filter(Number.isFinite);
-    this.host.querySelector('.canvas-empty').hidden = !!values.length;
-    if (!values.length) return;
+    const empty = this.host.querySelector('.canvas-empty');
+    empty.hidden = !!values.length;
+    empty.textContent = tracks.some(t => analyses[t.id]) ? '선택 구간에서 유효한 측정값을 찾지 못했습니다.' : '보컬 분석을 완료하면 그래프가 표시됩니다.';
+    if (!values.length) { this.box = null; this.tooltip.hidden = true; return; }
     let low = Math.min(...values), high = Math.max(...values);
     const padding = Math.max((high - low) * .12, kind === 'pitch' ? 1 : 2);
     low -= padding; high += padding;

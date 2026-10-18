@@ -11,6 +11,8 @@ dependencies = [
   "soundfile>=0.13,<1", "pymongo>=4.11,<5", "httpx>=0.28,<1",
   "imageio-ffmpeg>=0.6,<1",
   "jinja2>=3.1.6,<4",
+  "markdown-it-py>=3,<5", "bleach>=6.2,<7",
+  "demucs==4.0.1", "torch>=2.6,<2.9", "torchaudio>=2.6,<2.9",
 ]
 
 [dependency-groups]

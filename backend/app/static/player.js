@@ -1,4 +1,4 @@
-import { trackUrl } from './api.js';
+
 
 /** Shared timeline; audio instances survive DOM fragment refreshes. */
 export class StudioPlayer {
@@ -14,7 +14,8 @@ export class StudioPlayer {
     this.start = 0;
     this.end = 0;
     this.normalize = true;
-    this.multi = false;
+    this.multi = true;
+    this.monitorOriginal = false;
     this.onTick = onTick;
     this.onError = onError;
     this.timer = null;
@@ -27,7 +28,7 @@ export class StudioPlayer {
     if (!tracks.some(t => t.id === this.selected)) this.selected = tracks[0]?.id || '';
     for (const track of tracks.filter(t => t.status === 'ready')) {
       if (this.audio.has(track.id)) continue;
-      const audio = new Audio(trackUrl(pid, track.id));
+      const audio = new Audio(track.url);
       audio.preload = 'metadata';
       audio.addEventListener('error', () => { this.pause(); this.onError('오디오 재생 실패: 브라우저 지원 또는 서버 연결을 확인하세요.'); });
       this.audio.set(track.id, audio);
@@ -37,6 +38,9 @@ export class StudioPlayer {
       audio.pause(); audio.removeAttribute('src'); audio.load(); this.audio.delete(id);
     }
     this.position = Math.min(this.position, this.duration);
+    for (const t of tracks) {
+      if (!this.mix.has(t.id)) this.mix.set(t.id, { volume: .8, mute: !!t.derived, solo: false });
+    }
     this.applyMix();
   }
   applyMix() {
@@ -48,7 +52,9 @@ export class StudioPlayer {
       const mix = this.mixFor(t.id);
       const gain = this.normalize ? Math.min(1, 10 ** ((lowest - (t.summary?.rms_db ?? 0)) / 20)) : 1;
       audio.volume = Math.max(0, Math.min(1, mix.volume * gain));
-      audio.muted = mix.mute || (hasSolo ? !mix.solo : !this.multi && t.id !== this.active?.id);
+      const stems = ready.some(t => t.kind !== 'original');
+      const originalOnly = this.monitorOriginal || !stems;
+      audio.muted = mix.mute || (hasSolo ? !mix.solo : originalOnly ? t.kind !== 'original' : t.kind === 'original');
       audio.playbackRate = this.speed;
       audio.preservesPitch = true;
     }

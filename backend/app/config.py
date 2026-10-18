@@ -24,9 +24,11 @@ class Settings(BaseSettings):
     ai_url: str = ""
     ai_model: str = ""
     ai_api_key: str = ""
+    separation_model: str = "htdemucs"
+    separation_device: str = "auto"
 
     def prepare(self):
         if not self.storage_dir.is_absolute():
             self.storage_dir = ROOT / self.storage_dir
-        for name in ("uploads", "audio", "cache", "projects"):
+        for name in ("uploads", "audio", "cache", "projects", "models", "jobs"):
             (self.storage_dir / name).mkdir(parents=True, exist_ok=True)
