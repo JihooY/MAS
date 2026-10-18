@@ -1,0 +1,2 @@
+// UnivDash theme-boot adapted to an independent MAS preference namespace.
+(()=>{try{const d=document.documentElement,s=localStorage.getItem('mas-theme-style'),m=localStorage.getItem('mas-theme')||'dark';if(['mesh','apple','mono'].includes(s))d.setAttribute('data-ui-theme',s);if(m==='light')d.setAttribute('data-ui-theme-mode','light');d.style.colorScheme=m;if(localStorage.getItem('mas-sidebar-collapsed')==='true')d.classList.add('sidebar-collapsed')}catch{}})();
