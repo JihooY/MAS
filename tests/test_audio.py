@@ -43,11 +43,13 @@ def test_silence_has_no_invented_pitch_and_exact_hop(tmp_path):
 def test_independent_pitch_and_speed_transform(tmp_path):
     source = tone(tmp_path / "source.wav")
     output = tmp_path / "changed.wav"
-    meta = audio.transform(source, output, semitones=12, speed=0.8, normalize=True, max_duration=10)
-    assert meta["duration"] == pytest.approx(2.5, abs=.03)
+    meta = audio.transform(
+        source, output, semitones=12, speed=0.8, normalize=True, max_duration=10
+    )
+    assert meta["duration"] == pytest.approx(2.5, abs=0.03)
     result = audio.analyze(output, 10)
     assert result["summary"]["pitch_median_hz"] == pytest.approx(440, abs=5)
-    assert meta["peak"] == pytest.approx(.95, abs=.001)
+    assert meta["peak"] == pytest.approx(0.95, abs=0.001)
 
 
 def test_length_rejected_before_decode(tmp_path):
@@ -60,20 +62,23 @@ def test_flac_and_stereo_resampling(tmp_path):
     path = tmp_path / "stereo.flac"
     sr = 44100
     t = np.arange(sr) / sr
-    y = .2 * np.sin(2 * np.pi * 330 * t)
+    y = 0.2 * np.sin(2 * np.pi * 330 * t)
     sf.write(path, np.stack([y, y], axis=1), sr)
     output = tmp_path / "mono.wav"
     meta = audio.decode(path, output, 10)
     assert meta["channels"] == 1 and meta["sample_rate"] == 22050
-    assert meta["duration"] == pytest.approx(1, abs=.01)
+    assert meta["duration"] == pytest.approx(1, abs=0.01)
 
 
 def test_mp3_real_decode(tmp_path):
     source = tone(tmp_path / "source.wav", duration=1)
     mp3 = tmp_path / "encoded.mp3"
-    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", str(source), str(mp3)],
-                   check=True, capture_output=True)
+    subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", str(source), str(mp3)],
+        check=True,
+        capture_output=True,
+    )
     output = tmp_path / "decoded.wav"
     meta = audio.decode(mp3, output, 10)
-    assert meta["duration"] == pytest.approx(1, abs=.1)
-    assert meta["peak"] > .2
+    assert meta["duration"] == pytest.approx(1, abs=0.1)
+    assert meta["peak"] > 0.2

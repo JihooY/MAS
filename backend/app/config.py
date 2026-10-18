@@ -5,7 +5,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MAS_", env_file=ROOT / ".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="MAS_", env_file=ROOT / ".env", extra="ignore"
+    )
+    host: str = "127.0.0.1"
+    port: int = 8000
+    # Extra Host names allowed besides localhost, comma-separated (e.g. a reverse-proxy domain).
+    allowed_hosts: str = ""
     storage_dir: Path = ROOT / "storage"
     max_upload_mb: int = 150
     max_duration_seconds: int = 300

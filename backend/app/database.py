@@ -1,4 +1,5 @@
 """Mongo metadata store; explicit local preview mode before credentials are supplied."""
+
 import json
 import os
 import subprocess
@@ -30,20 +31,43 @@ class Store:
                 if s.ssh_alias.startswith("-") or any(c.isspace() for c in s.ssh_alias):
                     raise ValueError("SSH 별칭은 공백 없는 Host 별칭이어야 합니다.")
                 self.tunnel = subprocess.Popen(
-                    ["ssh", "-N", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                     "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=8",
-                     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-                     "-L", f"127.0.0.1:{s.ssh_local_port}:{s.ssh_remote_host}:{s.ssh_remote_port}",
-                     s.ssh_alias], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    [
+                        "ssh",
+                        "-N",
+                        "-T",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "StrictHostKeyChecking=yes",
+                        "-o",
+                        "ExitOnForwardFailure=yes",
+                        "-o",
+                        "ConnectTimeout=8",
+                        "-o",
+                        "ServerAliveInterval=15",
+                        "-o",
+                        "ServerAliveCountMax=3",
+                        "-L",
+                        f"127.0.0.1:{s.ssh_local_port}:{s.ssh_remote_host}:{s.ssh_remote_port}",
+                        s.ssh_alias,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 time.sleep(0.5)
                 if self.tunnel.poll() is not None:
-                    raise RuntimeError("SSH 터널 실패. 별칭, 키, known_hosts 및 포트 사용 여부를 확인하세요.")
+                    raise RuntimeError(
+                        "SSH 터널 실패. 별칭, 키, known_hosts 및 포트 사용 여부를 확인하세요."
+                    )
             options = {"directConnection": True} if s.ssh_alias else {}
-            self.client = MongoClient(s.mongo_uri, serverSelectionTimeoutMS=10000,
-                                      connectTimeoutMS=5000, **options)
+            self.client = MongoClient(
+                s.mongo_uri,
+                serverSelectionTimeoutMS=10000,
+                connectTimeoutMS=5000,
+                **options,
+            )
             self.client.admin.command("ping")
             self.collection = self.client[s.mongo_database].projects
         except Exception:
@@ -59,9 +83,14 @@ class Store:
             self.available()
             if self.collection is not None:
                 return list(self.collection.find({}, {"_id": 0}).sort("updated_at", -1))
-            return sorted([json.loads(p.read_text(encoding="utf-8"))
-                           for p in (self.settings.storage_dir / "projects").glob("*.json")],
-                          key=lambda p: p["updated_at"], reverse=True)
+            return sorted(
+                [
+                    json.loads(p.read_text(encoding="utf-8"))
+                    for p in (self.settings.storage_dir / "projects").glob("*.json")
+                ],
+                key=lambda p: p["updated_at"],
+                reverse=True,
+            )
 
     def get(self, project_id):
         return next((p for p in self.list() if p["id"] == project_id), None)
@@ -70,11 +99,16 @@ class Store:
         with self.lock:
             self.available()
             if self.collection is not None:
-                self.collection.replace_one({"id": project["id"]}, deepcopy(project), upsert=True)
+                self.collection.replace_one(
+                    {"id": project["id"]}, deepcopy(project), upsert=True
+                )
             else:
                 path = self.settings.storage_dir / "projects" / f"{project['id']}.json"
                 tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(project, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+                tmp.write_text(
+                    json.dumps(project, ensure_ascii=False, allow_nan=False),
+                    encoding="utf-8",
+                )
                 os.replace(tmp, path)
 
     def delete(self, project_id):
@@ -83,7 +117,9 @@ class Store:
             if self.collection is not None:
                 self.collection.delete_one({"id": project_id})
             else:
-                (self.settings.storage_dir / "projects" / f"{project_id}.json").unlink(missing_ok=True)
+                (self.settings.storage_dir / "projects" / f"{project_id}.json").unlink(
+                    missing_ok=True
+                )
 
     def close(self):
         if self.client is not None:

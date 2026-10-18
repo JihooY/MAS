@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -57,7 +58,10 @@ def create_app(settings=None):
             for project in store.list():
                 for t in project["tracks"]:
                     if t["status"] in ("queued", "processing"):
-                        t.update(status="failed", error="서버가 재시작되어 작업이 중단되었습니다. 다시 분석하세요.")
+                        t.update(
+                            status="failed",
+                            error="서버가 재시작되어 작업이 중단되었습니다. 다시 분석하세요.",
+                        )
                 store.save(project)
         yield
         pool.shutdown(wait=True, cancel_futures=True)
@@ -67,17 +71,31 @@ def create_app(settings=None):
     app.state.store = store
     app.state.jobs = jobs
 
+    allowed_hosts = {"127.0.0.1", "localhost", "testserver", "::1"} | {
+        h.strip().lower() for h in s.allowed_hosts.split(",") if h.strip()
+    }
+
     @app.middleware("http")
     async def same_origin(request: Request, call_next):
         # Local service: reject foreign browser origins and DNS rebinding hosts.
-        if request.url.hostname not in {"127.0.0.1", "localhost", "testserver", "::1"}:
-            return JSONResponse({"detail": "로컬 호스트에서만 사용할 수 있습니다."}, status_code=403)
+        if request.url.hostname not in allowed_hosts:
+            return JSONResponse(
+                {"detail": "로컬 호스트에서만 사용할 수 있습니다."}, status_code=403
+            )
+        # Compare host only: behind a TLS proxy the browser origin is https while uvicorn sees http.
         origin = request.headers.get("origin")
-        if origin and origin != f"{request.url.scheme}://{request.headers.get('host')}":
-            return JSONResponse({"detail": "다른 출처의 요청은 허용하지 않습니다."}, status_code=403)
+        if origin and urlsplit(origin).netloc != request.headers.get("host"):
+            return JSONResponse(
+                {"detail": "다른 출처의 요청은 허용하지 않습니다."}, status_code=403
+            )
         length = request.headers.get("content-length", "0")
-        if length.isdigit() and int(length) > (s.max_upload_mb * 1024 * 1024 + 1024 * 1024):
-            return JSONResponse({"detail": f"요청 크기가 제한({s.max_upload_mb}MB)을 초과합니다."}, status_code=413)
+        if length.isdigit() and int(length) > (
+            s.max_upload_mb * 1024 * 1024 + 1024 * 1024
+        ):
+            return JSONResponse(
+                {"detail": f"요청 크기가 제한({s.max_upload_mb}MB)을 초과합니다."},
+                status_code=413,
+            )
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -112,48 +130,89 @@ def create_app(settings=None):
 
     def submit(pid, tid, transform_args=None, source_id=None):
         jid = uuid4().hex
-        jobs[jid] = {"id": jid, "project_id": pid, "track_id": tid, "status": "queued", "progress": 0, "message": "분석 대기"}
+        jobs[jid] = {
+            "id": jid,
+            "project_id": pid,
+            "track_id": tid,
+            "status": "queued",
+            "progress": 0,
+            "message": "분석 대기",
+        }
         update_track(pid, tid, job_id=jid, status="queued", error=None)
 
         def work():
             job = jobs[jid]
+
             def progress(value, message):
                 job.update(progress=value, message=message)
+
             job.update(status="processing", progress=5, message="오디오 준비")
             target = s.storage_dir / "audio" / f"{tid}.wav"
             try:
                 _, track = track_or_404(pid, tid)
                 update_track(pid, tid, status="processing")
                 if transform_args:
-                    metadata = audio.transform(s.storage_dir / "audio" / f"{source_id}.wav", target,
-                                               **transform_args, max_duration=s.max_duration_seconds)
+                    metadata = audio.transform(
+                        s.storage_dir / "audio" / f"{source_id}.wav",
+                        target,
+                        **transform_args,
+                        max_duration=s.max_duration_seconds,
+                    )
                 elif not target.exists():
-                    metadata = audio.decode(s.storage_dir / "uploads" / track["stored_name"], target, s.max_duration_seconds)
+                    metadata = audio.decode(
+                        s.storage_dir / "uploads" / track["stored_name"],
+                        target,
+                        s.max_duration_seconds,
+                    )
                 else:
                     metadata = {}
                 update_track(pid, tid, **metadata)
-                data, cache_hit = audio.cached_analysis(target, s.storage_dir / "cache", s.max_duration_seconds, progress)
-                analysis_path(track).write_text(json.dumps(data, ensure_ascii=False, allow_nan=False), encoding="utf-8")
-                update_track(pid, tid, status="ready", cache_hit=cache_hit, summary=data["summary"])
+                data, cache_hit = audio.cached_analysis(
+                    target, s.storage_dir / "cache", s.max_duration_seconds, progress
+                )
+                analysis_path(track).write_text(
+                    json.dumps(data, ensure_ascii=False, allow_nan=False),
+                    encoding="utf-8",
+                )
+                update_track(
+                    pid,
+                    tid,
+                    status="ready",
+                    cache_hit=cache_hit,
+                    summary=data["summary"],
+                )
                 job.update(status="done", progress=100, message="분석 완료")
             except Exception as exc:
                 log.exception("Audio job %s failed", jid)
-                message = str(exc) if isinstance(exc, ValueError) else "처리 실패. 파일 형식·저장 공간을 확인하고 서버 로그를 참고하세요."
+                message = (
+                    str(exc)
+                    if isinstance(exc, ValueError)
+                    else "처리 실패. 파일 형식·저장 공간을 확인하고 서버 로그를 참고하세요."
+                )
                 try:
                     update_track(pid, tid, status="failed", error=message)
                 except Exception:
                     log.exception("Could not save failed job")
                 job.update(status="failed", message=message)
+
         pool.submit(work)
         return jobs[jid]
 
     @app.get("/api/health")
     def health():
-        return {"status": "degraded" if store.error else "ok", "database": store.mode,
-                "database_error": store.error, "ssh_enabled": bool(s.ssh_alias),
-                "ai_configured": bool(s.ai_url and s.ai_model), "ai_model": s.ai_model,
-                "engine": audio.ENGINE, "device": "CPU", "storage": str(s.storage_dir),
-                "max_upload_mb": s.max_upload_mb, "max_duration_seconds": s.max_duration_seconds}
+        return {
+            "status": "degraded" if store.error else "ok",
+            "database": store.mode,
+            "database_error": store.error,
+            "ssh_enabled": bool(s.ssh_alias),
+            "ai_configured": bool(s.ai_url and s.ai_model),
+            "ai_model": s.ai_model,
+            "engine": audio.ENGINE,
+            "device": "CPU",
+            "storage": str(s.storage_dir),
+            "max_upload_mb": s.max_upload_mb,
+            "max_duration_seconds": s.max_duration_seconds,
+        }
 
     @app.get("/api/projects")
     def projects():
@@ -161,7 +220,13 @@ def create_app(settings=None):
 
     @app.post("/api/projects", status_code=201)
     def new_project(data: ProjectInput):
-        p = {"id": uuid4().hex, "name": data.name.strip() or "새 보컬 프로젝트", "created_at": now(), "updated_at": now(), "tracks": []}
+        p = {
+            "id": uuid4().hex,
+            "name": data.name.strip() or "새 보컬 프로젝트",
+            "created_at": now(),
+            "updated_at": now(),
+            "tracks": [],
+        }
         store.save(p)
         return p
 
@@ -178,8 +243,11 @@ def create_app(settings=None):
             return p
 
     def delete_files(track):
-        for path in [s.storage_dir / "audio" / f"{track['id']}.wav", analysis_path(track),
-                     s.storage_dir / "uploads" / track.get("stored_name", "_missing")]:
+        for path in [
+            s.storage_dir / "audio" / f"{track['id']}.wav",
+            analysis_path(track),
+            s.storage_dir / "uploads" / track.get("stored_name", "_missing"),
+        ]:
             path.unlink(missing_ok=True)
 
     def busy(p):
@@ -220,17 +288,32 @@ def create_app(settings=None):
                 while chunk := file.file.read(1024 * 1024):
                     size += len(chunk)
                     if size > s.max_upload_mb * 1024 * 1024:
-                        raise HTTPException(413, f"파일당 최대 {s.max_upload_mb}MB까지 업로드할 수 있습니다.")
+                        raise HTTPException(
+                            413,
+                            f"파일당 최대 {s.max_upload_mb}MB까지 업로드할 수 있습니다.",
+                        )
                     out.write(chunk)
             if size == 0:
                 raise HTTPException(422, "빈 파일입니다.")
             with store.lock:
                 p = project_or_404(pid)
                 if len(p["tracks"]) >= 3:
-                    raise HTTPException(409, "한 프로젝트에서 최대 3개 트랙을 비교할 수 있습니다.")
-                track = {"id": tid, "name": Path((file.filename or "vocal").replace("\\", "/")).name[:180],
-                         "stored_name": target.name, "sha256": audio.digest(target), "status": "queued",
-                         "duration": 0, "offset": 0, "size": size, "created_at": now()}
+                    raise HTTPException(
+                        409, "한 프로젝트에서 최대 3개 트랙을 비교할 수 있습니다."
+                    )
+                track = {
+                    "id": tid,
+                    "name": Path((file.filename or "vocal").replace("\\", "/")).name[
+                        :180
+                    ],
+                    "stored_name": target.name,
+                    "sha256": audio.digest(target),
+                    "status": "queued",
+                    "duration": 0,
+                    "offset": 0,
+                    "size": size,
+                    "created_at": now(),
+                }
                 p["tracks"].append(track)
                 p["updated_at"] = now()
                 store.save(p)
@@ -255,8 +338,11 @@ def create_app(settings=None):
                 raise HTTPException(409, "프로젝트의 작업 완료 후 삭제할 수 있습니다.")
             delete_files(t)
             p["tracks"] = [x for x in p["tracks"] if x["id"] != tid]
-            p["reports"] = [r for r in p.get("reports", [])
-                            if not any(e["track_id"] == tid for e in r["evidence"])]
+            p["reports"] = [
+                r
+                for r in p.get("reports", [])
+                if not any(e["track_id"] == tid for e in r["evidence"])
+            ]
             p["updated_at"] = now()
             store.save(p)
             prune_cache()
@@ -267,7 +353,11 @@ def create_app(settings=None):
             _, track = track_or_404(pid, tid)
             if track["status"] in ("queued", "processing"):
                 raise HTTPException(409, "이미 처리 중입니다.")
-            params = track.get("transform") if not (s.storage_dir / "audio" / f"{tid}.wav").exists() else None
+            params = (
+                track.get("transform")
+                if not (s.storage_dir / "audio" / f"{tid}.wav").exists()
+                else None
+            )
             return submit(pid, tid, params, track.get("source_id"))
 
     @app.post("/api/projects/{pid}/tracks/{tid}/transform", status_code=202)
@@ -277,11 +367,21 @@ def create_app(settings=None):
             if source["status"] != "ready":
                 raise HTTPException(409, "분석이 완료된 트랙만 변형할 수 있습니다.")
             if len(p["tracks"]) >= 3:
-                raise HTTPException(409, "변형본을 추가하려면 트랙 슬롯 하나를 비워주세요.")
+                raise HTTPException(
+                    409, "변형본을 추가하려면 트랙 슬롯 하나를 비워주세요."
+                )
             new_id = uuid4().hex
-            track = {"id": new_id, "name": f"변형 · {source['name']}"[:180], "source_id": tid,
-                     "transform": data.model_dump(), "status": "queued", "duration": 0,
-                     "offset": source.get("offset", 0), "created_at": now(), "size": 0}
+            track = {
+                "id": new_id,
+                "name": f"변형 · {source['name']}"[:180],
+                "source_id": tid,
+                "transform": data.model_dump(),
+                "status": "queued",
+                "duration": 0,
+                "offset": source.get("offset", 0),
+                "created_at": now(),
+                "size": 0,
+            }
             p["tracks"].append(track)
             p["updated_at"] = now()
             store.save(p)
@@ -321,30 +421,61 @@ def create_app(settings=None):
         p = project_or_404(pid)
         if data.end <= data.start:
             raise HTTPException(422, "구간 끝은 시작보다 커야 합니다.")
-        analyses = {t["id"]: json.loads(analysis_path(t).read_text(encoding="utf-8"))
-                    for t in p["tracks"] if t["status"] == "ready"}
+        analyses = {
+            t["id"]: json.loads(analysis_path(t).read_text(encoding="utf-8"))
+            for t in p["tracks"]
+            if t["status"] == "ready"
+        }
         items = evidence(p["tracks"], analyses, data.start, data.end)
         if not items:
             raise HTTPException(409, "선택 구간에 분석 데이터가 없습니다.")
         if data.ai and not (s.ai_url and s.ai_model):
-            raise HTTPException(409, "AI 미설정: .env에서 MAS_AI_URL, MAS_AI_MODEL 및 필요 시 API 키를 설정하세요.")
+            raise HTTPException(
+                409,
+                "AI 미설정: .env에서 MAS_AI_URL, MAS_AI_MODEL 및 필요 시 API 키를 설정하세요.",
+            )
         jid = uuid4().hex
-        jobs[jid] = {"id": jid, "status": "queued", "progress": 0, "message": "리포트 생성 대기"}
+        jobs[jid] = {
+            "id": jid,
+            "status": "queued",
+            "progress": 0,
+            "message": "리포트 생성 대기",
+        }
+
         def work():
-            jobs[jid].update(status="processing", progress=25, message="AI 평가 중" if data.ai else "측정 리포트 작성 중")
+            jobs[jid].update(
+                status="processing",
+                progress=25,
+                message="AI 평가 중" if data.ai else "측정 리포트 작성 중",
+            )
             try:
-                content = ai_report(s, items) if data.ai else measured_report(items, data.start, data.end)
-                result = {"content": content, "evidence": items,
-                    "kind": "ai" if data.ai else "measured", "model": s.ai_model if data.ai else None, "created_at": now()}
+                content = (
+                    ai_report(s, items)
+                    if data.ai
+                    else measured_report(items, data.start, data.end)
+                )
+                result = {
+                    "content": content,
+                    "evidence": items,
+                    "kind": "ai" if data.ai else "measured",
+                    "model": s.ai_model if data.ai else None,
+                    "created_at": now(),
+                }
                 with store.lock:
                     current = store.get(pid)
                     if current is not None:
-                        current["reports"] = (current.get("reports", []) + [result])[-10:]
+                        current["reports"] = (current.get("reports", []) + [result])[
+                            -10:
+                        ]
                         store.save(current)
                 jobs[jid].update(status="done", progress=100, result=result)
             except Exception:
                 log.exception("Report failed")
-                jobs[jid].update(status="failed", message="AI 제공자 연결·인증·응답 오류입니다. .env의 URL, 모델, API 키를 확인하세요.")
+                jobs[jid].update(
+                    status="failed",
+                    message="AI 제공자 연결·인증·응답 오류입니다. .env의 URL, 모델, API 키를 확인하세요.",
+                )
+
         pool.submit(work)
         return jobs[jid]
 
@@ -352,9 +483,14 @@ def create_app(settings=None):
     if dist.exists():
         app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
     else:
+
         @app.get("/")
         def setup():
-            return {"message": "frontend에서 npm install 및 npm run build 후 서버를 다시 시작하세요.", "docs": "/docs"}
+            return {
+                "message": "frontend에서 npm install 및 npm run build 후 서버를 다시 시작하세요.",
+                "docs": "/docs",
+            }
+
     return app
 
 
