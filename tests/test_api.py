@@ -143,3 +143,37 @@ def test_mongo_store_roundtrip(tmp_path):
     assert store.get("123") == project
     store.delete("123")
     assert store.list() == []
+
+
+def test_jinja_pages_are_server_rendered_and_escape_names(client):
+    name = '<script>alert("project")</script>'
+    project = client.post('/api/projects', json={'name': name}).json()
+    for path in ['/', '/dashboard', '/workspace', '/compare', '/analysis', '/reports']:
+        page = client.get(path, params={'project': project['id']})
+        assert page.status_code == 200, page.text
+        assert page.headers['content-type'].startswith('text/html')
+        assert '&lt;script&gt;' in page.text
+        assert name not in page.text
+        assert '/static/app.js' in page.text
+        assert '/static/app.css' in page.text
+        assert 'studio-data' in page.text
+    assert client.get('/workspace?project=missing').status_code == 404
+
+
+def test_jinja_track_fragment_and_local_assets(client):
+    project = client.post('/api/projects', json={'name': '서버 렌더링'}).json()
+    stored = client.app.state.store.get(project['id'])
+    stored['tracks'] = [{'id': 'safe-id', 'name': '<img src=x onerror=alert(1)>.wav',
+                         'status': 'queued', 'duration': 0, 'offset': 0}]
+    client.app.state.store.save(stored)
+    fragment = client.get(f"/ui/tracks/{project['id']}")
+    assert fragment.status_code == 200
+    assert 'data-track="safe-id"' in fragment.text
+    assert '&lt;img' in fragment.text and '<img src=x' not in fragment.text
+    assert 'disabled' in fragment.text and '분석 대기 중' in fragment.text
+    for path in ['app.js', 'api.js', 'player.js', 'charts.js', 'app.css', 'icons.svg',
+                 'reference/theme.css', 'reference/fonts.css',
+                 'reference/fonts/inter-latin-wght-normal.woff2']:
+        response = client.get(f'/static/{path}')
+        assert response.status_code == 200, path
+        assert len(response.content) > 0

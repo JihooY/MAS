@@ -9,13 +9,13 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import audio
-from .config import ROOT, Settings
+from .config import Settings
 from .database import Store
 from .reports import ai_report, evidence, measured_report
+from .ui import register_ui
 
 log = logging.getLogger(__name__)
 
@@ -479,17 +479,7 @@ def create_app(settings=None):
         pool.submit(work)
         return jobs[jid]
 
-    dist = ROOT / "frontend" / "dist"
-    if dist.exists():
-        app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
-    else:
-
-        @app.get("/")
-        def setup():
-            return {
-                "message": "frontend에서 npm install 및 npm run build 후 서버를 다시 시작하세요.",
-                "docs": "/docs",
-            }
+    register_ui(app, store, health)
 
     return app
 

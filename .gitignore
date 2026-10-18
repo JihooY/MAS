@@ -221,7 +221,5 @@ __marimo__/
 
 # Music Analysis Studio runtime data
 storage/
-node_modules/
-*.tsbuildinfo
 .env.*
 !.env.example

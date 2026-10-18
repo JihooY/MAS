@@ -5,22 +5,25 @@
 사용자의 직접 요청에 따라 첨부 문서의 Phase 1 분리/4스템 기능보다 **보컬 비교·변형·측정·AI 해석**을 우선했다. 악기 분석과 음원 분리는 포함하지 않는다.
 
 ```
-frontend/src/
-  App.tsx          프로젝트 · 비교 워크플로 · 동기 재생
-  components.tsx   모달 · 파형 · 그래프 · 스펙트로그램 · 테마
-  api.ts           서버 API
-  types.ts         데이터 계약
-  styles.css       UnivDash 기반 반응형 레이아웃
-frontend/public/reference/   UnivDash 테마 CSS와 폰트
 backend/app/
   config.py        .env 설정
   database.py      OpenSSH 터널 · MongoDB / 명시적 로컬 미리보기 저장
   audio.py         디코딩 · 변형 · pYIN · RMS · STFT · 캐시
   reports.py       구간 측정 근거 · 제공자 교체 가능한 LLM 해석
   main.py          API · 작업 큐 · 파일 생명주기
+  ui.py            Jinja 페이지 라우트 · 초기 데이터 · 트랙 HTML 부분 갱신
+  templates/       공통 레이아웃 · 대시보드 · 작업 화면 · 모달 · 매크로
+  static/
+    app.js         일반 JavaScript 이벤트 · 업로드 · 분석/리포트 갱신
+    player.js      A/B/C 동기 재생 · 음량 매칭 · 구간 반복
+    charts.js      실제 분석값의 Canvas 그래프 · 파형 · 스펙트로그램
+    app.css        UnivDash 기반 반응형 레이아웃
+    reference/     UnivDash 테마 · 로컬 폰트 · 라이선스
 tests/             실신호 DSP 테스트 · API 통합 · Mongo 저장 계약
 storage/           원본 · 분석용 WAV · 캐시 · 로컬 미리보기 메타데이터 (Git 제외)
 ```
+
+HTML은 FastAPI의 Jinja2Templates로 서버에서 렌더링한다. 메뉴는 실제 페이지 URL로 이동한다. 진행 중 트랙은 Jinja HTML 조각을 요청해 갱신하고 오디오 인스턴스는 DOM 갱신과 분리해 재생을 유지한다. 그래프와 플레이어만 브라우저 JavaScript를 사용한다. Node.js 런타임이나 별도 프론트 빌드/서버는 없다.
 
 ## 데이터 흐름
 

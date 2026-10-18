@@ -1,6 +1,6 @@
 # Music Analysis Studio · MAS
 
-UnivDash 디자인을 바탕으로 만든 한국어 **보컬 비교 스튜디오**. React/TypeScript + FastAPI + NumPy/librosa, uv 기반 Python 환경, MongoDB/OpenSSH 연결을 사용한다. 악기 분석과 음원 분리는 별도 범위다.
+UnivDash 디자인을 바탕으로 만든 한국어 **보컬 비교 스튜디오**. FastAPI + Jinja2 + 일반 JavaScript + NumPy/librosa, uv 기반 Python 환경, MongoDB/OpenSSH 연결을 사용한다. 악기 분석과 음원 분리는 별도 범위다.
 
 ## 구현 기능
 
@@ -18,25 +18,19 @@ UnivDash 디자인을 바탕으로 만든 한국어 **보컬 비교 스튜디오
 
 ## 실행 (Windows PowerShell)
 
-필요: Python 3.11–3.13 (검증: 3.12), uv, Node.js 22.12 이상, npm 또는 pnpm.
+필요: Python 3.11–3.13 (검증: 3.12), uv. Node.js와 npm/pnpm, 프론트 빌드는 필요 없다.
 
 ```powershell
 uv sync --locked
-Copy-Item .env.example .env
-Set-Location frontend
-pnpm install --frozen-lockfile
-Set-Location ..
-node tools/build_frontend.mjs
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 uv run python run.py
 ```
-
-pnpm이 없다면 `frontend`에서 `npm install`로 설치한 뒤 같은 빌드 명령을 사용할 수 있다. 재현 가능한 프론트엔드 버전은 `frontend/pnpm-lock.yaml`에 고정되어 있다. pnpm의 esbuild 설치 스크립트 허용은 `frontend/pnpm-workspace.yaml`에 선언되어 있다.
 
 브라우저: **http://127.0.0.1:8000** · API 문서: http://127.0.0.1:8000/docs
 
 `uv` 캐시 권한 오류가 있는 제한 환경에서는 `$env:UV_CACHE_DIR = "$PWD/.cache/uv"`를 설정한다. 일반 실행에서는 필요 없다. 서버는 로컬 사용자 전용이며 단일 프로세스로 실행해야 한다.
 
-개발 시 서버: `uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000` / 별도 터미널에서 `frontend`의 `pnpm dev`. Vite가 `/api`를 8000 포트로 프록시한다. 첫 pYIN 분석은 numba 초기 컴파일로 1분 이상 걸릴 수 있고, 이후에는 캐시를 재사용한다.
+개발 시에도 `uv run uvicorn backend.app.main:app --reload` 하나만 실행한다. Jinja 템플릿은 서버에서 렌더링하고 CSS/JavaScript/폰트는 `/static`에서 제공한다. 첫 pYIN 분석은 numba 초기 컴파일로 1분 이상 걸릴 수 있고, 이후에는 캐시를 재사용한다.
 
 ## MongoDB / SSH
 
@@ -91,9 +85,8 @@ AI는 관찰·근거·연습 제안·한계를 설명한다. 가창 순위, 자�
 ```powershell
 uv sync --locked --group dev
 uv run pytest -q
-node tools/build_frontend.mjs
 ```
 
-합성 정현파로 F0·RMS·침묵·hop 경계, 독립 키/속도 변형, FLAC/스테레오 리샘플링을 검증한다. API 테스트는 업로드→분석→캐시→변형→리포트→삭제, 잘못된 파일, 오디오 Range 재생, 외부 Origin 거부를 포함한다. Mongo 저장 계약은 mongomock으로 검증하며 실제 SSH 연결은 접속 정보가 필요하다.
+합성 정현파로 F0·RMS·침묵·hop 경계, 독립 키/속도 변형, FLAC/스테레오 리샘플링을 검증한다. API 테스트는 업로드→분석→캐시→변형→리포트→삭제, 잘못된 파일, 오디오 Range 재생, 외부 Origin 거부를 포함한다. Jinja 페이지의 서버 렌더링, 파일명 이스케이프와 정적 자산 제공도 확인한다. Mongo 저장 계약은 mongomock으로 검증하며 실제 SSH 연결은 접속 정보가 필요하다.
 
 구조·지표 해석·다음 단계는 [docs/architecture.md](docs/architecture.md), 디자인 출처는 [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)를 참고한다.
