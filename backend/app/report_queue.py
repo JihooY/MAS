@@ -10,6 +10,8 @@ from fastapi import HTTPException
 
 from .markdown import render_markdown
 from .reports import ai_report, measured_report
+from .ai_provider import AIError, Provider, redact
+from .music_ai import PIPELINE_VERSION, audio_inputs, listen
 
 log = logging.getLogger(__name__)
 PENDING = {"queued", "processing"}
@@ -27,7 +29,10 @@ class ReportQueue:
         self.lock = store.lock
 
     def _provider_signature(self):
-        return sha256(json.dumps([self.settings.ai_url, self.settings.ai_model]).encode()).hexdigest()
+        s = self.settings
+        return sha256(json.dumps([PIPELINE_VERSION, s.audio_ai_url, s.audio_ai_model, s.audio_ai_api_key,
+                                  s.llm_ai_url, s.llm_ai_model, s.llm_ai_api_key,
+                                  s.audio_clip_seconds, s.audio_max_tokens, s.llm_max_tokens]).encode()).hexdigest()
 
     def recover(self):
         with self.lock:
@@ -51,10 +56,19 @@ class ReportQueue:
     def submit(self, project, items, start, end, ai, enqueue=False, language="ko"):
         language = "en" if language == "en" else "ko"
         # Include measured evidence so only identical pending work is coalesced.
+        inputs = []
+        if ai:
+            try:
+                Provider.from_settings(self.settings, "AUDIO")
+                Provider.from_settings(self.settings, "LLM")
+                inputs = audio_inputs(self.settings, project, items)
+            except AIError as exc:
+                raise HTTPException(409, redact(self.settings, exc)) from None
         payload = {"project_id": project["id"], "items": items, "start": start, "end": end,
-                   "ai": ai, "model": self.settings.ai_model if ai else None,
-                   "provider": self.settings.ai_url if ai else None}
-        # Keep fingerprints of existing Korean jobs compatible across this upgrade.
+                   "ai": ai, "inputs": inputs,
+                   "model": self.settings.llm_ai_model if ai else None,
+                   "provider_signature": self._provider_signature() if ai else None}
+        # Language belongs to the immutable request, including after restart.
         if language == "en":
             payload["language"] = language
         fingerprint = sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -71,6 +85,9 @@ class ReportQueue:
                    "source_ids": list(dict.fromkeys(i["source_id"] for i in items)),
                    "vocal_ids": [i["track_id"] for i in items], "task": "report",
                    "kind": "ai" if ai else "measured", "model": payload["model"],
+                   "audio_model": self.settings.audio_ai_model if ai else None,
+                   "pipeline_version": PIPELINE_VERSION if ai else None,
+                   "audio_inputs": inputs,
                    "language": language,
                    "provider_signature": self._provider_signature() if ai else None,
                    "fingerprint": fingerprint, "evidence": deepcopy(items), "start": start, "end": end,
@@ -87,13 +104,15 @@ class ReportQueue:
             if not job:
                 raise HTTPException(404, "작업 정보를 찾을 수 없습니다.")
             result = {k: deepcopy(v) for k, v in job.items()
-                      if k not in {"evidence", "fingerprint", "provider_signature", "start", "end", "result"}}
+                      if k not in {"evidence", "audio_inputs", "audio_analyses", "fingerprint", "provider_signature", "start", "end", "result"}}
             waiting = sorted((j for j in self.jobs.values() if j["status"] == "queued"),
                              key=lambda j: j["created_at"])
             result["queue_position"] = next((i + 1 for i, j in enumerate(waiting) if j["id"] == job_id), 0)
             if include_result and job.get("result"):
                 result["result"] = deepcopy(job["result"])
                 result["result"]["content_html"] = render_markdown(result["result"]["content"])
+            if include_result and job.get("audio_analyses") and not job.get("result"):
+                result["partial_audio_analyses"] = deepcopy(job["audio_analyses"])
             return result
 
     def snapshot(self, project_ids=None):
@@ -119,23 +138,57 @@ class ReportQueue:
                          message="AI 제공자 응답 대기" if job["kind"] == "ai" else "측정 리포트 작성 중")
         try:
             if job["kind"] == "ai" and job.get("provider_signature") != self._provider_signature():
-                raise ValueError("Queued AI provider configuration changed; submit a new request.")
+                raise AIError("Queued AI provider configuration changed; submit a new request.")
             # Persist the submitting language so restart or later UI switches cannot change a queued report.
             options = {"language": "en"} if job.get("language") == "en" else {}
-            content = (ai_report(self.settings, job["evidence"], **options) if job["kind"] == "ai"
-                       else measured_report(job["evidence"], job["start"], job["end"], **options))
+            observations, validation, completion = [], {}, {}
+            if job["kind"] == "ai":
+                if job.get("pipeline_version") != PIPELINE_VERSION or not job.get("audio_inputs"):
+                    raise AIError("This queued request predates audio listening. Submit a new request.")
+                for role in ("AUDIO", "LLM"):
+                    with self.lock:
+                        self._update(job, stage="model_check", message="서빙 모델 ID 확인 중")
+                    validation[role] = Provider.from_settings(self.settings, role).check_model(self.settings)
+                    with self.lock:
+                        self._update(job, validation=deepcopy(validation))
+                with self.lock:
+                    self._update(job, stage="listening", message="Music Flamingo 실제 오디오 분석 중")
+                def save_observations(values):
+                    with self.lock:
+                        self._update(job, audio_analyses=deepcopy(values),
+                                     message=f"Music Flamingo 오디오 구간 {len(values)}개 분석 완료")
+                observations = listen(self.settings, Provider.from_settings(self.settings, "AUDIO"),
+                                      job["audio_inputs"], job.get("language", "ko"), save_observations)
+                validation["AUDIO"]["audio_input_verified"] = True
+                validation["AUDIO"]["input_format"] = "input_audio/base64 WAV PCM_16 mono 24000Hz"
+                with self.lock:
+                    self._update(job, stage="interpreting", validation=deepcopy(validation),
+                                 message="gpt-oss 최종 보고서 생성 중")
+                completion = ai_report(self.settings, job["evidence"], audio_analyses=observations, **options)
+                content = completion["content"]
+                validation["LLM"]["text_generation_verified"] = True
+            else:
+                content = measured_report(job["evidence"], job["start"], job["end"], **options)
             result = {"job_id": job_id, "content": content, "content_html": render_markdown(content),
                       "evidence": job["evidence"], "kind": job["kind"], "model": job["model"],
                       "language": job.get("language", "ko"), "created_at": now()}
+            if job["kind"] == "ai":
+                result.update(pipeline_version=PIPELINE_VERSION, audio_model=job["audio_model"],
+                              audio_analyses=observations, validation=validation, expert_feedback=[],
+                              llm_response={k: v for k, v in completion.items() if k != "content"})
             with self.lock:
                 project = self.store.get(job["project_id"])
                 if project is not None:
                     project["reports"] = (project.get("reports", []) + [result])[-10:]
                     self.store.save(project)
                 self._update(job, status="done", progress=100, message="리포트 분석 완료", result=result)
-        except Exception:
-            log.exception("Report failed: %s", job_id)
+        except Exception as exc:
+            message = (redact(self.settings, exc) if isinstance(exc, AIError) else
+                       "Unexpected analysis error; check server logs and selected audio files.")
+            # Never log request bodies, headers, base64 audio, or exception reprs with credentials.
+            log.error("Report failed: %s stage=%s type=%s message=%s", job_id,
+                      job.get("stage", "report"), type(exc).__name__, message)
             with self.lock:
                 self._update(job, status="failed", progress=None,
-                             message="AI 제공자 연결·인증·응답 오류입니다. 연결 설정을 확인하고 다시 요청하세요."
+                             message=message
                              if job["kind"] == "ai" else "측정 리포트 생성에 실패했습니다. 서버 로그를 확인하세요.")

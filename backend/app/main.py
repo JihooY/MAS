@@ -19,6 +19,7 @@ from .project import upgrade_project
 from .config import Settings
 from .database import Store
 from .reports import evidence
+from .ai_provider import configured
 from .report_queue import ReportQueue
 from .ui import register_ui
 from .auth import Auth, register_auth
@@ -303,8 +304,10 @@ def create_app(settings=None):
             "database": store.mode,
             "database_error": store.error,
             "ssh_enabled": bool(s.ssh_alias),
-            "ai_configured": bool(s.ai_url and s.ai_model),
-            "ai_model": s.ai_model,
+            "ai_configured": configured(s),
+            "ai_model": s.llm_ai_model,
+            "audio_ai_model": s.audio_ai_model,
+            "ai_connection_status": "configured_unverified" if configured(s) else "not_configured",
             "engine": audio.ENGINE,
             "device": "CPU",
             "storage": str(s.storage_dir),
@@ -589,10 +592,10 @@ def create_app(settings=None):
                 raise HTTPException(409, "선택 구간에 분석 데이터가 없습니다.")
             if data.source_ids and len(data.source_ids) > 1 and len(items) < 2:
                 raise HTTPException(409, "비교하려면 최소 두 음원의 보컬 분석을 완료하세요.")
-            if data.ai and not (s.ai_url and s.ai_model):
+            if data.ai and not configured(s):
                 raise HTTPException(
                     409,
-                    "AI 미설정: .env에서 MAS_AI_URL, MAS_AI_MODEL 및 필요 시 API 키를 설정하세요.",
+                    "AI 미설정: .env에서 AUDIO_AI_URL/MODEL/API_KEY와 LLM_AI_URL/MODEL/API_KEY를 설정하세요.",
                 )
             return report_queue.submit(p, items, data.start, data.end, data.ai, data.enqueue,
                                        language=get_language(request))

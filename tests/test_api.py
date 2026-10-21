@@ -51,8 +51,8 @@ def client(tmp_path, monkeypatch):
         storage_dir=tmp_path,
         mongo_uri="",
         ssh_alias="",
-        ai_url="",
-        ai_model="",
+        audio_ai_url="",
+        llm_ai_url="",
     )
     with TestClient(create_app(settings)) as c:
         assert c.post('/register', data={'email': 'tester@gmail.com',

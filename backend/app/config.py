@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -6,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="MAS_", env_file=ROOT / ".env", extra="ignore"
+        env_prefix="MAS_", env_file=ROOT / ".env", extra="ignore", populate_by_name=True
     )
     host: str = "127.0.0.1"
     port: int = 8000
@@ -21,9 +22,17 @@ class Settings(BaseSettings):
     ssh_remote_host: str = "127.0.0.1"
     ssh_remote_port: int = 27017
     ssh_local_port: int = 27018
-    ai_url: str = ""
-    ai_model: str = ""
-    ai_api_key: str = ""
+    # These aliases intentionally do not use the MAS_ prefix.
+    audio_ai_url: str = Field(default="", validation_alias="AUDIO_AI_URL")
+    audio_ai_model: str = Field(default="nvidia/music-flamingo-hf", validation_alias="AUDIO_AI_MODEL")
+    audio_ai_api_key: str = Field(default="", validation_alias="AUDIO_AI_API_KEY", repr=False)
+    llm_ai_url: str = Field(default="", validation_alias="LLM_AI_URL")
+    llm_ai_model: str = Field(default="openai/gpt-oss-120b", validation_alias="LLM_AI_MODEL")
+    llm_ai_api_key: str = Field(default="", validation_alias="LLM_AI_API_KEY", repr=False)
+    ai_timeout_seconds: float = Field(default=300, gt=0, le=1800)
+    audio_clip_seconds: float = Field(default=30, ge=1, le=30)
+    audio_max_tokens: int = Field(default=1024, ge=128, le=8192)
+    llm_max_tokens: int = Field(default=8192, ge=256, le=32768)
     separation_model: str = "htdemucs"
     separation_device: str = "auto"
     admin_email: str = ""

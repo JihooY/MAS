@@ -215,10 +215,10 @@ def test_english_ai_prompt_keeps_evidence_and_safety_instructions():
         return httpx.Response(200, json={'choices': [{'message': {'content': '## Summary\nMeasured feedback.'}}]})
 
     real_client = httpx.Client
-    config = SimpleNamespace(ai_url='http://provider', ai_model='model', ai_api_key='')
-    with patch('backend.app.reports.httpx.Client', side_effect=lambda **kw: real_client(transport=httpx.MockTransport(respond), **kw)):
-        assert ai_report(config, [item()], language='en').startswith('## Summary')
+    config = Settings(_env_file=None, llm_ai_url='http://provider/v1', llm_ai_model='model', llm_ai_api_key='test-key')
+    with patch('backend.app.ai_provider.httpx.Client', side_effect=lambda **kw: real_client(transport=httpx.MockTransport(respond), **kw)):
+        assert ai_report(config, [item()], language='en', audio_analyses=[{'content': 'Vocals.'}])['content'].startswith('## Summary')
     system = seen[0]['messages'][0]['content']
     assert 'English report' in system and 'untrusted filenames' in system
     assert 'not listened to the audio' in system and 'Do not rank singers' in system
-    assert json.loads(seen[0]['messages'][1]['content']) == [item()]
+    assert json.loads(seen[0]['messages'][1]['content'])['dsp_evidence'] == [item()]

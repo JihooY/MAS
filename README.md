@@ -87,21 +87,37 @@ MAS_MONGO_DATABASE=music_analysis_studio
 
 ## AI 평가
 
-`.env`에 OpenAI 호환 Chat Completions **전체 URL**, 모델, 필요 시 API 키를 설정한 뒤 서버를 재시작한다.
+`.env`에서 **실제 음악 청취 모델**과 **최종 해석 모델**을 독립적으로 설정하고 서버를 재시작한다. URL은 기본 주소(`/v1`)와 전체 Chat Completions 주소를 모두 지원한다. API 키는 FastAPI 서버에서만 사용하며 브라우저에 전달하지 않는다.
 
 ```dotenv
-MAS_AI_URL=https://YOUR-PROVIDER/v1/chat/completions
-MAS_AI_MODEL=YOUR-MODEL
-MAS_AI_API_KEY=YOUR-KEY
+AUDIO_AI_URL=https://YOUR-MUSIC-SERVER/v1/chat/completions
+AUDIO_AI_MODEL=nvidia/music-flamingo-hf
+AUDIO_AI_API_KEY=YOUR-MUSIC-SERVER-KEY
+
+LLM_AI_URL=https://YOUR-LLM-SERVER/v1/chat/completions
+LLM_AI_MODEL=openai/gpt-oss-120b
+LLM_AI_API_KEY=YOUR-LLM-SERVER-KEY
 ```
 
-로컬 모델 서버도 같은 응답 규격으로 연결할 수 있다. AI 평가 버튼을 누를 때 **파일명과 측정 요약만** 제공자에 보내며 오디오 원본은 보내지 않는다. 제공자를 설정하지 않으면 AI 버튼은 비활성이고 측정 리포트만 동작한다. 연결 정보 미제공 상태에서 실제 외부 LLM 응답은 검증하지 않았다.
+`AUDIO_*`는 Music Flamingo, `LLM_*`는 gpt-oss-120b다. 기존 `MAS_AI_URL/MODEL/API_KEY` 설정은 이 두 그룹으로 교체한다. 같은 OpenAI Chat Completions JSON 형식을 기존 HTTPX 어댑터로 요청하므로 OpenAI SDK의 추가 설치는 필요 없다. MAS 자체 기본 포트는 8000이므로 같은 PC에서 LLM 서버도 8000을 사용하면 MAS_PORT를 변경해야 한다.
+
+사용 순서: 음악 A/B/C 업로드 → 기존 Demucs 분리 → 보컬 분석 켜기 → 구간/비교 대상 선택 → **AI 분석**. 선택 구간의 원본 믹스와 분리 보컬을 Music Flamingo에 각각 보낸 뒤, 그 관찰과 DSP 측정값을 gpt-oss에 보내 최종 보고서를 작성한다. 변형 보컬은 속도·음정이 달라질 수 있어 변형본만 청취한다. 원본이 없는 이전 형식 프로젝트도 보컬만 청취한다. gpt-oss에는 오디오 바이트를 보내지 않는다. AI 미설정 상태에서도 기존 측정·분리·재생·비교 기능은 사용할 수 있다.
+
+각 AI 요청은 두 서버의 `/v1/models`에서 설정한 ID가 실제 제공되는지 확인한다. ID가 다르면 실패하며 다른 모델로 자동 변경하지 않는다. 실제 WAV 요청의 성공 전에는 오디오 입력 지원을 검증된 것으로 표시하지 않는다. 형식은 `input_audio`의 Base64 WAV(모노 24kHz PCM16)다. 긴 선택 구간은 기본 30초 이하로 나눠 전체를 전송하고 마지막 부분을 버리지 않는다. 파일명·모델 관찰은 지시가 아닌 데이터로 취급한다. API 오류/인증/타임아웃/빈 응답/토큰 제한으로 잘린 응답은 실패 상태와 안전하게 정리한 서버 로그로 남긴다.
+
+실제 연결 진단은 `.env` 설정 후 다음 명령으로 실행한다. 실제 음악 WAV의 첫 최대 5초를 전송한다. 모델 목록만 확인하거나 파일을 생략하면 음악 입력 검증 성공으로 처리하지 않는다. 진단 결과에 DSP 측정은 포함되지 않으며, 전체 DSP 통합은 스튜디오의 AI 분석에서 실행된다.
+
+```powershell
+uv run python -m backend.check_ai --audio "C:/music/sample.wav" --output storage/ai-connection-check.json
+```
+
+종료 코드 0은 두 모델 ID 확인과 실제 WAV 청취·최종 해석 요청이 모두 성공했음을 뜻한다. 서버가 스키마를 받아 텍스트를 반환하는지 검증하며, 분석의 음악적 정확도는 별도 전문가 검토가 필요하다. 모델 파일 이름이 같아도 서버의 vLLM 버전·모델 구현·chat template에 따라 지원 여부가 달라질 수 있다. [vLLM 오디오 입력](https://docs.vllm.ai/en/latest/features/multimodal_inputs/#audio-inputs), [NVIDIA Music Flamingo 모델 카드](https://huggingface.co/nvidia/music-flamingo-hf), [OpenAI 오디오 요청 형식](https://developers.openai.com/api/docs/guides/audio-chat-completions)을 참고한다.
 
 진행 상황과 대기 순서는 서버에서 관리한다. 같은 계정으로 로그인한 브라우저·탭·페이지는 해당 계정의 공통 진행 패널을 표시하고 2초마다 갱신한다. 새로고침하거나 창을 닫아도 분석은 계속되며, 다시 접속하면 해당 음원의 요청 상태와 완료 결과를 복원한다. 서버 전체의 처리 중 여부와 대기 순번은 공유하지만 다른 계정의 프로젝트명·작업 내용·결과는 노출하지 않는다.
 
 리포트 분석은 서버 전체에서 한 번에 하나씩 실행한다. 실행/대기 요청이 있으면 일반 즉시 요청은 HTTP 409로 거부하며, **AI 대기열에 추가** 또는 **측정 대기열에 추가**로 명시적으로 접수한 요청을 FIFO 순서로 처리한다. 같은 프로젝트·측정 근거·구간·모델의 동일한 진행/대기 요청은 기존 작업 ID를 반환해 중복 호출하지 않는다. 실행/대기 합계는 최대 20개다. 한 요청이 실패해도 다음 요청은 계속 처리한다.
 
-작업 메타데이터와 결과는 MongoDB의 `report_jobs` 컬렉션(로컬 미리보기는 `storage/jobs/`)에 저장한다. 서버 재시작 시 실행 중이던 요청은 중단 실패로 표시하고, 아직 실행 전인 대기 요청은 복원한다. 제공자 URL/모델 설정이 바뀐 대기 AI 요청은 자동 전송하지 않고 실패 처리한다. API 키는 작업에 저장하지 않는다. 제공자가 진행률을 보내지 않으므로 응답 대기는 단계 상태로 표시한다.
+작업 메타데이터와 결과는 MongoDB의 `report_jobs` 컬렉션(로컬 미리보기는 `storage/jobs/`)에 저장한다. 서버 재시작 시 실행 중이던 요청은 중단 실패로 표시하고, 아직 실행 전인 대기 요청은 복원한다. 두 제공자의 URL/모델/키 또는 요청 설정이 바뀐 대기 AI 요청은 자동 전송하지 않고 실패 처리한다. API 키와 Base64 음원은 작업에 저장하지 않는다. 청취 결과·정확한 구간·WAV SHA-256·모델·검증 결과·DSP 근거·최종 보고서는 저장한다. 최종 LLM이 실패해도 완료한 청취 결과는 해당 작업에 남는다. 전문가 검토·학습을 위한 원자료이며 전문가 피드백 입력 시스템과 파인튜닝은 이번 단계에 포함하지 않는다. 제공자가 진행률을 보내지 않으므로 응답 대기는 단계 상태로 표시한다.
 
 AI는 관찰·근거·연습 제안·한계를 설명한다. 가창 순위, 자의적인 100점 점수, 확정적 창법 판정은 만들지 않는다. 측정 리포트와 AI 해석은 UI에서 구분된다.
 

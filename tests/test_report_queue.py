@@ -2,6 +2,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import time
+import numpy as np
+import soundfile as sf
 
 import mongomock
 import pytest
@@ -13,11 +15,13 @@ from backend.app.database import Store
 from backend.app.main import create_app
 from backend.app.report_queue import ReportQueue
 from backend.app import report_queue as queue_module
+from backend.app.ai_provider import AIError
 
 
 def settings(path):
     return Settings(_env_file=None, storage_dir=path, mongo_uri='', ssh_alias='',
-                    ai_url='http://test-provider/v1/chat/completions', ai_model='test-model')
+                    audio_ai_url='http://audio-provider/v1', audio_ai_api_key='audio-key',
+                    llm_ai_url='http://test-provider/v1', llm_ai_model='test-model', llm_ai_api_key='llm-key')
 
 
 def ready_project(app, name):
@@ -26,7 +30,8 @@ def ready_project(app, name):
                'updated_at': '2026', 'tracks': [{'id': 'source', 'name': 'music.wav',
                'status': 'ready', 'duration': 1, 'separation_status': 'ready',
                'stems': [{'id': name+'-vocal', 'name': '보컬', 'kind': 'vocals',
-                          'status': 'ready', 'duration': 1}]}]}
+                          'status': 'ready', 'duration': 1, 'file': name+'-vocal.wav'}]}]}
+    sf.write(app.state.store.settings.storage_dir / 'audio' / (name+'-vocal.wav'), np.zeros(24000), 24000)
     app.state.store.save(project)
     data = {'summary': {'duration': 1}, 'vibrato_candidates': [],
             'series': {'time': [.1, .5, .9], 'rms_db': [-20, -21, -20],
@@ -51,15 +56,17 @@ def test_clients_share_queue_reject_direct_requests_deduplicate_and_continue_aft
     entered, release = Event(), Event()
     calls = []
 
-    def provider(config, items):
+    def provider(config, items, **options):
         calls.append(items[0]['range_seconds'][1])
         if len(calls) == 1:
             entered.set()
             assert release.wait(10)
-            raise ValueError('simulated provider failure')
-        return '## 분석 완료\n\n| 항목 | 값 |\n| --- | --- |\n| 음높이 | 220 Hz |'
+            raise AIError('simulated provider failure')
+        return {'content': '## 분석 완료\n\n| 항목 | 값 |\n| --- | --- |\n| 음높이 | 220 Hz |'}
 
     monkeypatch.setattr(queue_module, 'ai_report', provider)
+    monkeypatch.setattr(queue_module.Provider, 'check_model', lambda self, s: {'model_verified': True})
+    monkeypatch.setattr(queue_module, 'listen', lambda *a: [{'content': 'test listening observation'}])
     app = create_app(settings(tmp_path))
     with TestClient(app) as a:
         b = TestClient(app)  # Separate browser/client; the same server lifespan.
@@ -80,7 +87,7 @@ def test_clients_share_queue_reject_direct_requests_deduplicate_and_continue_aft
             assert snapshot['jobs'][0]['status'] == 'processing'
             assert 'evidence' not in snapshot['jobs'][0]
             page = b.get('/workspace?project=project-a').text
-            assert '공유 분석 진행 상황' in page and 'AI 제공자 응답 대기' in page
+            assert '공유 분석 진행 상황' in page and 'gpt-oss 최종 보고서 생성 중' in page
             assert b.delete('/api/projects/project-a').status_code == 409
 
             # Simultaneous submissions from separate clients create no extra work.
