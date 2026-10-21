@@ -7,6 +7,7 @@ from .markdown import render_markdown
 from .project import upgrade_project
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from .i18n import install_i18n, language_context
 
 UI_ROOT = Path(__file__).parent
 COLORS = ["#60a5fa", "#c084fc", "#34d399"]
@@ -23,6 +24,7 @@ def format_time(value):
 
 def register_ui(app, store, get_health, get_report_queue):
     templates = Jinja2Templates(directory=UI_ROOT / "templates")
+    install_i18n(templates)
     templates.env.filters["clock"] = format_time
     templates.env.globals.update(colors=COLORS, nav=NAV)
     app.mount("/static", StaticFiles(directory=UI_ROOT / "static"), name="static")
@@ -30,7 +32,7 @@ def register_ui(app, store, get_health, get_report_queue):
     def context(request, page, project_id=None, source_id=None):
         error = None
         try:
-            projects = [upgrade_project(p) for p in store.list()]
+            projects = [upgrade_project(p) for p in app.state.auth.visible_projects(request.state.user)]
         except Exception:
             projects = []
             error = get_health().get("database_error") or "저장소 연결 실패. MongoDB와 SSH 설정을 확인하세요."
@@ -59,11 +61,12 @@ def register_ui(app, store, get_health, get_report_queue):
         ready = [v for v in stems if v["kind"] == "vocals" and v["status"] == "ready"]
         all_sources = [t for p in projects for t in p["tracks"]]
         health = get_health()
-        queue = get_report_queue() if not error else {"busy": False, "jobs": [], "recent": []}
+        queue = get_report_queue({p["id"] for p in projects}) if not error else {"busy": False, "jobs": [], "recent": []}
         if project:
             for report in project.get("reports", []):
                 report["content_html"] = render_markdown(report["content"])
         return {
+            **language_context(request),
             "request": request, "page": page, "page_label": "프로젝트" if page == "dashboard" else "스튜디오",
             "projects": projects, "project": project, "sources": sources, "source": source,
             "tracks": playback, "vocal": vocal, "vocals": [v for v in stems if v["kind"] == "vocals"],
@@ -73,7 +76,7 @@ def register_ui(app, store, get_health, get_report_queue):
             "summary": vocal.get("summary") if vocal else None,
             "overview": [len(projects), len(all_sources), sum(t.get("separation_status") == "ready" for t in all_sources),
                          sum(t.get("separation_status") in ("queued", "processing") for t in all_sources)],
-            "health": health, "error": error,
+            "health": health, "error": error, "user": request.state.user,
             "report_queue": queue,
             "bootstrap": {"page": page, "project": project, "source_id": source["id"] if source else None,
                           "health": health, "report_queue": queue},

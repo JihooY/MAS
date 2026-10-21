@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 export async function api(path, options = {}) {
   const response = await fetch(`/api${path}`, {
     ...options,
@@ -7,8 +8,9 @@ export async function api(path, options = {}) {
     },
   });
   if (!response.ok) {
+    if (response.status === 401) window.location.assign('/login');
     const body = await response.json().catch(() => ({}));
-    throw new Error(typeof body.detail === 'string' ? body.detail : `요청 실패 (${response.status}). 입력값과 서버 연결을 확인하세요.`);
+    throw new Error(typeof body.detail === 'string' ? t(body.detail) : t('요청 실패 ({status}). 입력값과 서버 연결을 확인하세요.',{status:response.status}));
   }
   return response.status === 204 ? null : response.json();
 }

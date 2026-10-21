@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 
 
 /** Shared timeline; audio instances survive DOM fragment refreshes. */
@@ -30,7 +31,7 @@ export class StudioPlayer {
       if (this.audio.has(track.id)) continue;
       const audio = new Audio(track.url);
       audio.preload = 'metadata';
-      audio.addEventListener('error', () => { this.pause(); this.onError('오디오 재생 실패: 브라우저 지원 또는 서버 연결을 확인하세요.'); });
+      audio.addEventListener('error', () => { this.pause(); this.onError(t('오디오 재생 실패: 브라우저 지원 또는 서버 연결을 확인하세요.')); });
       this.audio.set(track.id, audio);
     }
     for (const [id, audio] of this.audio) {
@@ -86,7 +87,7 @@ export class StudioPlayer {
       const at = this.position + t.offset;
       if (at < 0 || at >= t.duration) { audio.pause(); continue; }
       if (audio.readyState && Math.abs(audio.currentTime - at) > .2) audio.currentTime = at;
-      if (audio.paused) audio.play().catch(() => { if (this.playing) { this.pause(); this.onError('재생을 시작할 수 없습니다. 브라우저 오디오 권한이나 서버 연결을 확인하세요.'); } });
+      if (audio.paused) audio.play().catch(() => { if (this.playing) { this.pause(); this.onError(t('재생을 시작할 수 없습니다. 브라우저 오디오 권한이나 서버 연결을 확인하세요.')); } });
     }
   }
   tick() {

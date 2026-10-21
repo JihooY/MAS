@@ -11,6 +11,7 @@ from typing import Literal
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import audio, separation
 from .markdown import render_markdown
@@ -20,6 +21,8 @@ from .database import Store
 from .reports import evidence
 from .report_queue import ReportQueue
 from .ui import register_ui
+from .auth import Auth, register_auth
+from .i18n import get_language, register_language, translate
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +67,7 @@ def create_app(settings=None):
     s = settings or Settings()
     s.prepare()
     store = Store(s)
+    auth = Auth(store, s)
     jobs = {}
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vocal-worker")
     report_queue = ReportQueue(store, s, pool)
@@ -72,6 +76,7 @@ def create_app(settings=None):
     async def lifespan(app):
         store.connect()
         if not store.error:
+            auth.initialize()
             for project in store.list():
                 upgrade_project(project)
                 for t in project["tracks"]:
@@ -95,6 +100,7 @@ def create_app(settings=None):
     app.state.store = store
     app.state.jobs = jobs
     app.state.report_queue = report_queue
+    app.state.auth = auth
 
     allowed_hosts = {"127.0.0.1", "localhost", "testserver", "::1"} | {
         h.strip().lower() for h in s.allowed_hosts.split(",") if h.strip()
@@ -105,30 +111,49 @@ def create_app(settings=None):
         # Local service: reject foreign browser origins and DNS rebinding hosts.
         if request.url.hostname not in allowed_hosts:
             return JSONResponse(
-                {"detail": "로컬 호스트에서만 사용할 수 있습니다."}, status_code=403
+                {"detail": translate("로컬 호스트에서만 사용할 수 있습니다.", get_language(request))}, status_code=403
             )
         # Compare host only: behind a TLS proxy the browser origin is https while uvicorn sees http.
         origin = request.headers.get("origin")
         if origin and urlsplit(origin).netloc != request.headers.get("host"):
             return JSONResponse(
-                {"detail": "다른 출처의 요청은 허용하지 않습니다."}, status_code=403
+                {"detail": translate("다른 출처의 요청은 허용하지 않습니다.", get_language(request))}, status_code=403
             )
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            referer = request.headers.get("referer")
+            if request.headers.get("sec-fetch-site") == "cross-site" or (
+                referer and urlsplit(referer).netloc != request.headers.get("host")
+            ):
+                return JSONResponse({"detail": translate("다른 출처의 요청은 허용하지 않습니다.", get_language(request))}, status_code=403)
         length = request.headers.get("content-length", "0")
         if length.isdigit() and int(length) > (
             s.max_upload_mb * 1024 * 1024 + 1024 * 1024
         ):
             return JSONResponse(
-                {"detail": f"요청 크기가 제한({s.max_upload_mb}MB)을 초과합니다."},
+                {"detail": translate("요청 크기가 제한({size}MB)을 초과합니다.", get_language(request), size=s.max_upload_mb)},
                 status_code=413,
             )
-        response = await call_next(request)
+        try:
+            denied = auth.guard(request)
+        except RuntimeError as exc:
+            return JSONResponse({"detail": translate(str(exc), get_language(request))}, status_code=503)
+        response = denied if denied is not None else await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # no-referrer turns Origin into null for ordinary form POSTs in Chromium.
+        # Keep same-site form origins while withholding referrers from other sites.
+        response.headers["Referrer-Policy"] = "same-origin"
+        if not request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.exception_handler(RuntimeError)
     async def unavailable(request, exc):
-        return JSONResponse({"detail": str(exc)}, status_code=503)
+        return JSONResponse({"detail": translate(str(exc), get_language(request))}, status_code=503)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request, exc):
+        detail = translate(exc.detail, get_language(request)) if isinstance(exc.detail, str) else exc.detail
+        return JSONResponse({"detail": detail}, status_code=exc.status_code, headers=exc.headers)
 
     def project_or_404(pid):
         project = store.get(pid)
@@ -291,14 +316,15 @@ def create_app(settings=None):
         }
 
     @app.get("/api/projects")
-    def projects():
-        return store.list()
+    def projects(request: Request):
+        return auth.visible_projects(request.state.user)
 
     @app.post("/api/projects", status_code=201)
-    def new_project(data: ProjectInput):
+    def new_project(data: ProjectInput, request: Request):
         p = {
             "id": uuid4().hex,
-            "name": data.name.strip() or "새 음악 프로젝트",
+            "owner_id": request.state.user["user_id"],
+            "name": data.name.strip() or translate("새 음악 프로젝트", get_language(request)),
             "schema_version": 2,
             "created_at": now(),
             "updated_at": now(),
@@ -312,10 +338,10 @@ def create_app(settings=None):
         return project_or_404(pid)
 
     @app.patch("/api/projects/{pid}")
-    def rename(pid: str, data: ProjectInput):
+    def rename(pid: str, data: ProjectInput, request: Request):
         with store.lock:
             p = project_or_404(pid)
-            p.update(name=data.name.strip() or "새 음악 프로젝트", updated_at=now())
+            p.update(name=data.name.strip() or translate("새 음악 프로젝트", get_language(request)), updated_at=now())
             store.save(p)
             return p
 
@@ -492,14 +518,16 @@ def create_app(settings=None):
         return json.loads(analysis_path(vocal).read_text(encoding="utf-8"))
 
     @app.get("/api/report-jobs")
-    def report_jobs():
-        return report_queue.snapshot()
+    def report_jobs(request: Request):
+        return report_queue.snapshot({p["id"] for p in auth.visible_projects(request.state.user)})
 
     @app.get("/api/jobs/{jid}")
-    def job(jid: str):
-        if jid not in jobs:
-            return report_queue.get(jid)
-        return jobs[jid]
+    def job(jid: str, request: Request):
+        result = jobs[jid] if jid in jobs else report_queue.get(jid)
+        project = store.get(result["project_id"])
+        if not project or project.get("owner_id") != request.state.user["user_id"]:
+            raise HTTPException(404, "작업 정보를 찾을 수 없습니다.")
+        return result
 
     @app.get("/api/projects/{pid}/tracks/{tid}/audio")
     def get_audio(pid: str, tid: str):
@@ -534,7 +562,7 @@ def create_app(settings=None):
         return report
 
     @app.post("/api/projects/{pid}/reports", status_code=202)
-    def report(pid: str, data: ReportInput):
+    def report(pid: str, data: ReportInput, request: Request):
         with store.lock:
             p = project_or_404(pid)
             if data.end <= data.start:
@@ -552,7 +580,7 @@ def create_app(settings=None):
                         continue
                     if not data.vocal_id and vocal.get("derived"):
                         continue
-                    vocals.append({**vocal, "name": source["name"] + " · " + vocal["name"],
+                    vocals.append({**vocal, "name": source["name"] + " · " + translate(vocal["name"], get_language(request)),
                                    "source_id": source["id"], "offset": 0 if data.vocal_id else source.get("offset", 0)})
             analyses = {v["id"]: json.loads(analysis_path(v).read_text(encoding="utf-8"))
                         for v in vocals if analysis_path(v).is_file()}
@@ -566,8 +594,11 @@ def create_app(settings=None):
                     409,
                     "AI 미설정: .env에서 MAS_AI_URL, MAS_AI_MODEL 및 필요 시 API 키를 설정하세요.",
                 )
-            return report_queue.submit(p, items, data.start, data.end, data.ai, data.enqueue)
+            return report_queue.submit(p, items, data.start, data.end, data.ai, data.enqueue,
+                                       language=get_language(request))
 
+    register_auth(app, auth)
+    register_language(app, s)
     register_ui(app, store, health, report_queue.snapshot)
 
     return app

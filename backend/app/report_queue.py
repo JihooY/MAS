@@ -48,11 +48,15 @@ class ReportQueue:
             return any(j["status"] in PENDING and (project_id is None or j["project_id"] == project_id)
                        for j in self.jobs.values())
 
-    def submit(self, project, items, start, end, ai, enqueue=False):
+    def submit(self, project, items, start, end, ai, enqueue=False, language="ko"):
+        language = "en" if language == "en" else "ko"
         # Include measured evidence so only identical pending work is coalesced.
         payload = {"project_id": project["id"], "items": items, "start": start, "end": end,
                    "ai": ai, "model": self.settings.ai_model if ai else None,
                    "provider": self.settings.ai_url if ai else None}
+        # Keep fingerprints of existing Korean jobs compatible across this upgrade.
+        if language == "en":
+            payload["language"] = language
         fingerprint = sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.lock:
             for job in self.jobs.values():
@@ -67,6 +71,7 @@ class ReportQueue:
                    "source_ids": list(dict.fromkeys(i["source_id"] for i in items)),
                    "vocal_ids": [i["track_id"] for i in items], "task": "report",
                    "kind": "ai" if ai else "measured", "model": payload["model"],
+                   "language": language,
                    "provider_signature": self._provider_signature() if ai else None,
                    "fingerprint": fingerprint, "evidence": deepcopy(items), "start": start, "end": end,
                    "status": "queued", "progress": 0, "message": "리포트 분석 대기",
@@ -91,9 +96,11 @@ class ReportQueue:
                 result["result"]["content_html"] = render_markdown(result["result"]["content"])
             return result
 
-    def snapshot(self):
+    def snapshot(self, project_ids=None):
         with self.lock:
-            ordered = sorted(self.jobs.values(), key=lambda j: j["created_at"])
+            ordered = sorted((j for j in self.jobs.values()
+                              if project_ids is None or j["project_id"] in project_ids),
+                             key=lambda j: j["created_at"])
             return {"busy": self.has_pending(),
                     "jobs": [self.get(j["id"], False) for j in ordered if j["status"] in PENDING],
                     "recent": [self.get(j["id"], False) for j in ordered if j["status"] not in PENDING][-50:]}
@@ -113,10 +120,13 @@ class ReportQueue:
         try:
             if job["kind"] == "ai" and job.get("provider_signature") != self._provider_signature():
                 raise ValueError("Queued AI provider configuration changed; submit a new request.")
-            content = (ai_report(self.settings, job["evidence"]) if job["kind"] == "ai"
-                       else measured_report(job["evidence"], job["start"], job["end"]))
+            # Persist the submitting language so restart or later UI switches cannot change a queued report.
+            options = {"language": "en"} if job.get("language") == "en" else {}
+            content = (ai_report(self.settings, job["evidence"], **options) if job["kind"] == "ai"
+                       else measured_report(job["evidence"], job["start"], job["end"], **options))
             result = {"job_id": job_id, "content": content, "content_html": render_markdown(content),
-                      "evidence": job["evidence"], "kind": job["kind"], "model": job["model"], "created_at": now()}
+                      "evidence": job["evidence"], "kind": job["kind"], "model": job["model"],
+                      "language": job.get("language", "ko"), "created_at": now()}
             with self.lock:
                 project = self.store.get(job["project_id"])
                 if project is not None:

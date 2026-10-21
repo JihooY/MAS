@@ -1,8 +1,7 @@
 {% macro icon(name, size=17, extra='') -%}
-<svg class="icon {{ extra }}" width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>
-{%- endmacro %}
+<svg class="icon {{ extra }}" width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>{%- endmacro %}
 {% macro range_controls(duration) %}
-<div class="range-controls"><span>{{ icon('clock3',13) }} 비교 구간</span><label><span class="sr-only">구간 시작 초</span><input id="range-start" type="number" min="0" max="{{ duration }}" step="0.1" value="0">초</label><span>—</span><label><span class="sr-only">구간 끝 초</span><input id="range-end" type="number" min="0.01" max="{{ duration }}" step="0.1" value="{{ duration }}">초</label><button class="chip" data-action="loop" aria-pressed="false">{{ icon('repeat2',13) }} 반복</button></div>
+<div class="range-controls"><span>{{ icon('clock3',13) }} {{ t('비교 구간') }}</span><label><span class="sr-only">{{ t('구간 시작 초') }}</span><input id="range-start" type="number" min="0" max="{{ duration }}" step="0.1" value="0">{{ t('초') }}</label><span>—</span><label><span class="sr-only">{{ t('구간 끝 초') }}</span><input id="range-end" type="number" min="0.01" max="{{ duration }}" step="0.1" value="{{ duration }}">{{ t('초') }}</label><button class="chip" data-action="loop" aria-pressed="false">{{ icon('repeat2',13) }} {{ t('반복') }}</button></div>
 {% endmacro %}
 {% macro empty(title, description) %}
 <div class="empty"><div class="empty-icon">{{ icon('waves',27) }}</div><h3>{{ title }}</h3><p>{{ description }}</p></div>

@@ -157,3 +157,37 @@ class Store:
                 self.tunnel.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.tunnel.kill()
+
+    def identity_records(self, kind):
+        self.available()
+        if self.collection is not None:
+            return list(self.collection.database[kind].find({}, {"_id": 0}))
+        return [json.loads(p.read_text(encoding="utf-8"))
+                for p in (self.settings.storage_dir / kind).glob("*.json")]
+
+    def identity_get(self, kind, key):
+        self.available()
+        if self.collection is not None:
+            return self.collection.database[kind].find_one({"id": key}, {"_id": 0})
+        path = self.settings.storage_dir / kind / f"{key}.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def identity_save(self, kind, record):
+        # Keys are server-generated UUIDs or SHA-256 digests, never email/path input.
+        with self.lock:
+            self.available()
+            if self.collection is not None:
+                self.collection.database[kind].replace_one({"id": record["id"]}, deepcopy(record), upsert=True)
+            else:
+                path = self.settings.storage_dir / kind / f"{record['id']}.json"
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, path)
+
+    def identity_delete(self, kind, key):
+        with self.lock:
+            self.available()
+            if self.collection is not None:
+                self.collection.database[kind].delete_one({"id": key})
+            else:
+                (self.settings.storage_dir / kind / f"{key}.json").unlink(missing_ok=True)

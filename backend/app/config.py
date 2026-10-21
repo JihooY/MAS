@@ -26,9 +26,13 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     separation_model: str = "htdemucs"
     separation_device: str = "auto"
+    admin_email: str = ""
+    admin_password: str = ""
+    session_https_only: bool = False
+    session_max_hours: int = 12
 
     def prepare(self):
         if not self.storage_dir.is_absolute():
             self.storage_dir = ROOT / self.storage_dir
-        for name in ("uploads", "audio", "cache", "projects", "models", "jobs"):
+        for name in ("uploads", "audio", "cache", "projects", "models", "jobs", "users", "auth_sessions"):
             (self.storage_dir / name).mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,27 @@
+{% from 'macros.html' import icon with context %}
+{% set signup = mode == 'register' %}
+<!doctype html><html lang="{{ lang }}"><head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#05070f"><meta name="robots" content="noindex,nofollow">
+  <title>{{ t('회원가입') if signup else t('로그인') }} · MAS</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/reference/fonts.css"><link rel="stylesheet" href="/static/reference/theme.css"><link rel="stylesheet" href="/static/app.css">
+  <script src="/static/reference/theme-boot.js"></script>
+</head><body class="auth-body">
+<main class="auth-card glass-strong">
+  <a class="auth-brand" href="/login"><span class="brand-mark">{{ icon('audio-lines',28) }}</span><span>MAS <small>Music Analysis Studio</small></span></a>
+  <p class="auth-eyebrow">YOUR PERSONAL STUDIO</p>
+  <h1>{{ t('나만의 스튜디오 시작하기') if signup else t('다시 만나 반가워요') }}</h1>
+  <p class="auth-description">{{ t('Gmail 주소로 가입하고 음악 프로젝트를 저장하세요.') if signup else t('내 프로젝트와 분석 결과를 이어서 확인하세요.') }}</p>
+  <nav class="auth-tabs" aria-label="{{ t('계정 메뉴') }}"><a href="/login" class="{{ 'active' if not signup }}" {% if not signup %}aria-current="page"{% endif %}>{{ t('로그인') }}</a><a href="/register" class="{{ 'active' if signup }}" {% if signup %}aria-current="page"{% endif %}>{{ t('회원가입') }}</a></nav>
+  {% if error %}<div class="auth-error" role="alert">{{ t(error) }}</div>{% endif %}
+  <form action="/{{ mode }}" method="post" class="auth-form">
+    <label for="email">{{ t('Gmail 주소') }}</label><input id="email" name="email" type="email" autocomplete="username" inputmode="email" placeholder="you@gmail.com" value="{{ email }}" maxlength="254" required autofocus autocapitalize="none" spellcheck="false">
+    <label for="password">{{ t('사용할 비밀번호') if signup else t('비밀번호') }}</label><input id="password" name="password" type="password" autocomplete="{{ 'new-password' if signup else 'current-password' }}" {% if signup %}minlength="12"{% endif %} maxlength="256" placeholder="{{ t('12자 이상 입력하세요') if signup else t('비밀번호를 입력하세요') }}" required>
+    {% if signup %}<label for="password-confirm">{{ t('비밀번호 확인') }}</label><input id="password-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="{{ t('비밀번호를 한 번 더 입력하세요') }}" required>{% endif %}
+    <button type="submit" class="auth-submit">{{ t('계정 만들기') if signup else t('로그인') }}</button>
+  </form>
+  <p class="auth-note">{{ t('MAS 전용 비밀번호를 사용하세요. Google 계정 비밀번호를 입력하지 마세요.') }}</p>
+  <p class="auth-switch">{{ t('이미 계정이 있나요?') if signup else t('처음 오셨나요?') }} <a href="/{{ 'login' if signup else 'register' }}">{{ t('로그인하기') if signup else t('회원가입하기') }}</a></p>
+{% set in_settings = false %}{% include 'language_picker.html' %}</main>
+<script id="mas-i18n" type="application/json">{{ {"lang": lang, "messages": i18n_messages} | tojson }}</script><script type="module" src="/static/i18n.js"></script></body></html>

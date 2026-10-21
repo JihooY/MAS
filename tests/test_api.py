@@ -55,6 +55,9 @@ def client(tmp_path, monkeypatch):
         ai_model="",
     )
     with TestClient(create_app(settings)) as c:
+        assert c.post('/register', data={'email': 'tester@gmail.com',
+            'password': 'test-password-123', 'password_confirm': 'test-password-123'},
+            follow_redirects=False).status_code == 303
         yield c
 
 

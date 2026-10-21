@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 import { fmt } from './api.js';
 export const COLORS = ['#60a5fa', '#c084fc', '#34d399'];
 const midiNote = m => { const n = Math.round(m); return ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'][((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1); };
@@ -44,7 +45,7 @@ export class ComparisonChart {
     const values = series.flatMap(s => s.points.map(p => p.value)).filter(Number.isFinite);
     const empty = this.host.querySelector('.canvas-empty');
     empty.hidden = !!values.length;
-    empty.textContent = tracks.some(t => analyses[t.id]) ? '선택 구간에서 유효한 측정값을 찾지 못했습니다.' : '보컬 분석을 완료하면 그래프가 표시됩니다.';
+    empty.textContent = tracks.some(t => analyses[t.id]) ? t('선택 구간에서 유효한 측정값을 찾지 못했습니다.') : t('보컬 분석을 완료하면 그래프가 표시됩니다.');
     if (!values.length) { this.box = null; this.tooltip.hidden = true; return; }
     let low = Math.min(...values), high = Math.max(...values);
     const padding = Math.max((high - low) * .12, kind === 'pitch' ? 1 : 2);
@@ -80,7 +81,7 @@ export class ComparisonChart {
     const rect = this.canvas.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const time = start + Math.max(0, Math.min(1, (px - this.box.left) / this.box.width)) * (end - start);
-    const lines = [`${time.toFixed(2)}초`];
+    const lines = [t('{time}초',{time:time.toFixed(2)})];
     for (const s of this.series) {
       const p = s.points.reduce((best, next) => !best || Math.abs(next.time - time) < Math.abs(best.time - time) ? next : best, null);
       const value = Number.isFinite(p?.value) ? kind === 'pitch' ? `${midiNote(p.value)} (${p.value.toFixed(1)} MIDI)` : `${p.value.toFixed(1)} ${kind === 'rms' ? 'dBFS' : 'Hz'}` : '—';

@@ -1,3 +1,32 @@
+.auth-body { min-height: 100dvh; height: auto; overflow: auto; display: grid; place-items: center; padding: 32px 20px; }
+main.auth-card { width: min(100%, 440px); min-height: 0; height: auto; display: block; padding: 36px; border: 1px solid var(--border); border-radius: 26px; box-shadow: 0 24px 80px #0003; }
+.auth-brand { display: flex; align-items: center; gap: 12px; font-size: 25px; font-weight: 750; text-decoration: none; color: var(--text); }
+.auth-brand small { display: block; color: var(--muted); font-size: 10px; letter-spacing: 1px; font-weight: 500; margin-top: 3px; }
+.auth-eyebrow { color: var(--blue); font-size: 10px; letter-spacing: 2px; margin-top: 34px; }
+.auth-card h1 { font-size: 25px; letter-spacing: -1px; margin: 10px 0; }
+.auth-description, .auth-note, .auth-switch { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.auth-tabs { display: flex; margin: 24px 0; border-bottom: 1px solid var(--border); }
+.auth-tabs a { flex: 1; text-align: center; padding: 12px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
+.auth-tabs a.active { color: var(--blue); border-color: var(--blue); }
+.auth-form { display: grid; gap: 10px; }
+.auth-form label { font-size: 12px; margin-top: 6px; }
+.auth-form input { width: 100%; min-width: 0; height: 46px; background: var(--field); border: 1px solid var(--border); border-radius: 10px; padding: 0 14px; color: var(--text); font: inherit; font-size: 16px; }
+.auth-form input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.auth-form .auth-submit { margin-top: 14px; display: flex; justify-content: center; align-items: center; gap: 12px; min-height: 46px; border: 0; border-radius: 10px; background: #3b82f6; color: #fff; font-size: 14px; font-weight: 650; cursor: pointer; }
+.auth-error { border: 1px solid #f8717166; background: #f8717114; color: var(--text); border-radius: 10px; padding: 12px; margin-bottom: 16px; font-size: 13px; }
+.auth-switch { text-align: center; margin: 24px 0 0; }
+.auth-switch a { color: var(--blue); margin-left: 6px; }
+.auth-card .auth-note { margin-top: 14px; }
+.language-form { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 20px 0; }
+.language-form label { font-size: 12px; color: var(--muted); }
+.language-form select { flex: 1; min-width: 110px; padding: 10px 12px; background: var(--field); border: 1px solid var(--border); border-radius: 9px; color: var(--text); }
+.language-form option { color: #18243b; background: #fff; }
+.auth-card .language-form { margin: 24px 0 0; padding-top: 18px; border-top: 1px solid var(--border); gap: 8px; }
+.auth-card .language-form button { padding: 8px 10px; }
+html[lang="en"] .settings-nav { min-width: 210px; }
+.account-identity { min-width: 0; }
+.account-identity strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 480px) { main.auth-card { padding: 26px 22px; } }
 /* MAS layout follows UnivDash's glass shell, nav, settings and theme system.
    Original theme tokens/styles are retained in public/reference/theme.css. */
 :root {

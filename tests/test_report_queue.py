@@ -22,6 +22,7 @@ def settings(path):
 
 def ready_project(app, name):
     project = {'id': name, 'name': name, 'schema_version': 2, 'created_at': '2026',
+               'owner_id': app.state.auth.store.identity_records('users')[0]['user_id'],
                'updated_at': '2026', 'tracks': [{'id': 'source', 'name': 'music.wav',
                'status': 'ready', 'duration': 1, 'separation_status': 'ready',
                'stems': [{'id': name+'-vocal', 'name': '보컬', 'kind': 'vocals',
@@ -63,6 +64,9 @@ def test_clients_share_queue_reject_direct_requests_deduplicate_and_continue_aft
     with TestClient(app) as a:
         b = TestClient(app)  # Separate browser/client; the same server lifespan.
         try:
+            credentials = {'email': 'queue@gmail.com', 'password': 'test-password-123'}
+            assert a.post('/register', data={**credentials, 'password_confirm': credentials['password']}, follow_redirects=False).status_code == 303
+            assert b.post('/login', data=credentials, follow_redirects=False).status_code == 303
             ready_project(app, 'project-a')
             ready_project(app, 'project-b')
             request = {'start': 0, 'end': .8, 'ai': True}
