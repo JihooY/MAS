@@ -32,6 +32,22 @@ def wait_job(client, jid):
     pytest.fail("background job timeout")
 
 
+def test_manual_structure_sections_validate_persist_and_delete(client):
+    project = client.post('/api/projects', json={'name': 'structure'}).json()
+    base = f"/api/projects/{project['id']}"
+    upload = client.post(base+'/tracks', files={'file': ('song.wav', wav(), 'audio/wav')}).json()
+    wait_job(client, upload['job']['id'])
+    route = base+'/tracks/'+upload['track']['id']+'/sections'
+    for value in ({'name': ' ', 'start': 0, 'end': .5}, {'name': '후렴', 'start': 0, 'end': 2}, {'name': '후렴', 'start': .5, 'end': .51}):
+        assert client.post(route, json=value).status_code == 422
+    section = client.post(route, json={'name': '후렴 1', 'start': .2, 'end': .7})
+    assert section.status_code == 201 and section.json()['origin'] == 'manual'
+    stored = client.get(base).json()['tracks'][0]['sections'][0]
+    assert stored['name'] == '후렴 1'
+    assert client.delete(route+'/'+stored['id']).status_code == 204
+    assert client.get(base).json()['tracks'][0]['sections'] == []
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     # API orchestration fixture only. Real model inference is verified separately.

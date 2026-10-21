@@ -1,5 +1,7 @@
 # 음악 AI 통합 검증 기록
 
+현재 구조와 채점 규칙은 [music-context.md](music-context.md)를 참고한다. 아래 이전 흐름 설명은 v1 기록이며, 최신 변경은 이 문서 끝의 v2 검증에 기록한다.
+
 검증일: 2026-10-21 (Asia/Singapore).
 
 ## 구현한 흐름
@@ -61,3 +63,18 @@ uv run python -m backend.check_ai --audio "C:/music/sample.wav" --output storage
 - [vLLM 오디오 입력](https://docs.vllm.ai/en/latest/features/multimodal_inputs/#audio-inputs): OpenAI 호환 오디오 메시지 형식.
 - [NVIDIA Music Flamingo 모델 카드](https://huggingface.co/nvidia/music-flamingo-hf): 모델 역할과 오디오 처리 특성.
 - [OpenAI 오디오 Chat Completions](https://developers.openai.com/api/docs/guides/audio-chat-completions): Base64 `input_audio` 구조.
+
+
+## music-context-v2 검증 (2026-10-21)
+
+전체 로컬 테스트 72개 통과, JavaScript 구문 검사 통과. 기존 음악 분리·재생·비교·변형·인증과 함께 다음을 검증했다. 마지막 화면 배치와 프로젝트 요약 저장 변경 후 관련 API/큐/화면 테스트 43개도 다시 통과했다.
+
+- 동일 구간의 Full Mix / Vocal / Instrumental 독립 청취, 전체 곡 맥락의 별도 보관.
+- 비보컬 스템 합산, 실제 프레임 연속성, 수동 구조 구간과 요청 한도 내 경계.
+- gpt-oss 3종 해석 → 통합 비교의 네 요청, 유형별 탭과 저장된 원본 응답.
+- 여섯 항목의 근거 검증, 백엔드 10점 가중 계산, null 항목/종합 점수 보류.
+- 없는/다른 음원 근거, Full Mix 없는 상호작용, 11점/boolean/NaN 점수와 잘못된 스키마의 실패 처리.
+- 최종 단계 실패 시 부분 청취/LLM 응답 보존, 키 비노출.
+- 구간 저장·조회·삭제 및 기존 한영 화면.
+
+외부 AI 응답과 Demucs 대형 가중치는 테스트 대체 구현이다. 원격 GPU 서버의 내부 상태나 실제 음악의 점수 타당성은 검사하지 않았다. 기존 .env 설정은 유지하며 실제 서버 검증 상태도 여전히 미검증이다. 원격 모델 ID/오디오 지원/4단계 JSON 응답/토큰 제한/음악적 정확도는 [별도 진단 항목](music-context.md#로컬-검증과-원격-서버-진단)으로 남긴다.

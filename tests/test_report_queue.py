@@ -28,10 +28,11 @@ def ready_project(app, name):
     project = {'id': name, 'name': name, 'schema_version': 2, 'created_at': '2026',
                'owner_id': app.state.auth.store.identity_records('users')[0]['user_id'],
                'updated_at': '2026', 'tracks': [{'id': 'source', 'name': 'music.wav',
-               'status': 'ready', 'duration': 1, 'separation_status': 'ready',
+               'status': 'ready', 'duration': 1, 'separation_status': 'ready', 'original_file': name+'-original.wav',
                'stems': [{'id': name+'-vocal', 'name': '보컬', 'kind': 'vocals',
-                          'status': 'ready', 'duration': 1, 'file': name+'-vocal.wav'}]}]}
-    sf.write(app.state.store.settings.storage_dir / 'audio' / (name+'-vocal.wav'), np.zeros(24000), 24000)
+                          'status': 'ready', 'duration': 1, 'file': name+'-vocal.wav'}, {'id': name+'-other', 'kind': 'other', 'file': name+'-other.wav', 'status': 'ready'}]}]}
+    for kind in ('vocal', 'original', 'other'):
+        sf.write(app.state.store.settings.storage_dir / 'audio' / (name+'-'+kind+'.wav'), np.zeros(24000), 24000)
     app.state.store.save(project)
     data = {'summary': {'duration': 1}, 'vibrato_candidates': [],
             'series': {'time': [.1, .5, .9], 'rms_db': [-20, -21, -20],

@@ -207,18 +207,19 @@ def test_report_api_uses_language_cookie_and_keeps_saved_report_language(tmp_pat
         assert saved['language'] == 'en' and saved['content'] == job['result']['content']
 
 
-def test_english_ai_prompt_keeps_evidence_and_safety_instructions():
+def test_english_ai_prompt_keeps_evidence_and_uncertainty_instructions():
+    from tests.music_fakes import item as music_item, observations, response_for
     seen = []
-
     def respond(request):
-        seen.append(json.loads(request.content))
-        return httpx.Response(200, json={'choices': [{'message': {'content': '## Summary\nMeasured feedback.'}}]})
-
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(response_for(body))}}]})
     real_client = httpx.Client
     config = Settings(_env_file=None, llm_ai_url='http://provider/v1', llm_ai_model='model', llm_ai_api_key='test-key')
     with patch('backend.app.ai_provider.httpx.Client', side_effect=lambda **kw: real_client(transport=httpx.MockTransport(respond), **kw)):
-        assert ai_report(config, [item()], language='en', audio_analyses=[{'content': 'Vocals.'}])['content'].startswith('## Summary')
+        result = ai_report(config, [music_item()], language='en', audio_analyses=observations())
+    assert 'Whole-song overview' in result['content'] and 'AI estimated score / 10' in result['content']
     system = seen[0]['messages'][0]['content']
     assert 'English report' in system and 'untrusted filenames' in system
-    assert 'not listened to the audio' in system and 'Do not rank singers' in system
-    assert json.loads(seen[0]['messages'][1]['content'])['dsp_evidence'] == [item()]
+    assert 'not listened to the audio' in system and 'Compare recordings' in system
+    assert json.loads(seen[0]['messages'][1]['content'])['dsp_evidence'] == [music_item()]

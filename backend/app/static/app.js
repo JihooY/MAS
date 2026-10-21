@@ -10,7 +10,7 @@ state.vocalId = ''; state.mode = preference.get('analysis-mode','normal');
 state.enabled = preference.get(`analysis-${state.source_id}`,false);
 let modal = null, previousFocus = null, projectMode = 'new', deleteTarget = null;
 let refreshing = false, uploading = false, analysisSubmitting = false, reportSubmitting = false;
-let signature = '', historySignature = '', rangeInitialized = false, toastTimer;
+let signature = '', historySignature = '', sectionSignature = '', rangeInitialized = false, toastTimer;
 let queueSignature = '', displayedReportJob = '';
 state.report_queue ||= {busy:false,jobs:[],recent:[]};
 if(state.report_queue.jobs.some(j=>j.project_id===state.project?.id&&j.source_ids.includes(state.source_id)))state.enabled=true;
@@ -70,18 +70,20 @@ function renderControls(){
   for(const t of player.tracks){const mix=player.mixFor(t.id);for(const key of ['mute','solo']){const b=$(`[data-action="${key}"][data-id="${t.id}"]`);if(b)pressed(b,mix[key]);}const input=$(`[data-volume="${t.id}"]`);if(input)input.value=mix.volume;const label=$(`[data-volume-label="${t.id}"]`);if(label)label.textContent=Math.round(mix.volume*100)+'%';drawWaveform($(`[data-wave="${t.id}"]`),t.waveform?{waveform:t.waveform}:state.analyses[t.id]);}
   const monitor=$('[data-action="monitor-original"]');if(monitor)pressed(monitor,player.monitorOriginal||!player.tracks.some(t=>t.kind!=='original'));
   const select=$('#analysis-track');if(select){const old=select.value;select.innerHTML=vocals().map(v=>`<option value="${v.id}">${esc(t(v.name))}</option>`).join('');select.value=v?.id||old;}
+  if($('#ai-context-warning'))$('#ai-context-warning').hidden=!(v?.derived||s.legacy_vocal||!s.original_file);
   if($('#analysis-toggle')){const toggle=$('#analysis-toggle');toggle.classList.toggle('on',state.enabled);toggle.setAttribute('aria-checked',String(state.enabled));toggle.setAttribute('aria-label',state.enabled?t('보컬 분석 끄기'):t('보컬 분석 켜기'));$('#analysis-disabled').hidden=state.enabled;$('#analysis-enabled').hidden=!state.enabled;$('#analysis-availability').textContent=v?t('보컬 분리 완료 · 분석 가능'):t('먼저 보컬 분리를 완료하세요');}
   $$('[data-action="analysis-mode"]').forEach(b=>pressed(b,b.dataset.mode===state.mode));$$('[data-advanced]').forEach(el=>el.hidden=state.mode!=='advanced');
   if($('#analysis-state'))$('#analysis-state').textContent=v?({pending:t('분석을 켜면 측정을 시작합니다'),queued:t('보컬 분석 대기'),processing:t('보컬 분석 중'),ready:t('실제 측정 완료'),failed:t(v.error)||t('분석 실패')}[v.status]||''):t('보컬 분리 필요');
   $$('[data-action="analyze"]').forEach(b=>b.disabled=!v||['queued','processing'].includes(v.status)||analysisSubmitting);
   $$('[data-action="transform"]').forEach(b=>b.disabled=v?.status!=='ready');
   $$('[data-action="generate-report"]').forEach(b=>{
-    const ai=b.dataset.ai==='true',queued=b.id==='enqueue-ai';
-    b.disabled=v?.status!=='ready'||reportSubmitting||ai&&!state.health.ai_configured||ai&&!queued&&state.report_queue.busy;
+    const ai=b.dataset.ai==='true',queued=b.id==='enqueue-ai',compare=$('#report-scope')?.value==='project';
+    const contextReady=!s.legacy_vocal&&!!s.original_file&&(s.stems||[]).some(stem=>!['vocals','original'].includes(stem.kind)&&stem.status==='ready');
+    b.disabled=v?.status!=='ready'||reportSubmitting||ai&&(!contextReady||!compare&&v?.derived)||ai&&!state.health.ai_configured||ai&&!queued&&state.report_queue.busy;
     if(queued)b.hidden=!state.report_queue.busy;
     if(!ai){b.dataset.enqueue=String(state.report_queue.busy);b.textContent=state.report_queue.busy?t('측정 대기열에 추가'):t('측정 리포트');}
   });
-  syncPreferences();syncRange();paintPosition();
+  syncPreferences();syncRange();renderSections();paintPosition();
 }
 function graphVocals(){if($('#compare-vocals')?.checked)return sources().map((s,i)=>{const v=s.stems?.find(v=>v.kind==='vocals'&&!v.derived);return v?{...v,name:s.name,offset:s.offset||0,color:COLORS[i]}:null;}).filter(Boolean);const v=vocal();return v?[{...v,name:source().name+' · '+t(v.name),offset:0}]:[];}
 function renderAnalysis(){
@@ -107,7 +109,30 @@ async function refresh(){
   }catch(e){$('#connection-label').textContent=t('연결 확인 필요');showError(e.message);}finally{refreshing=false;}
 }
 async function uploadFiles(files){if(!files?.length||uploading)return;const list=Array.from(files);if(list.length+sources().length>3){showError(t('프로젝트에는 원본 음악을 최대 3개까지 넣을 수 있습니다.'));return;}if(list.some(f=>!/[.](wav|mp3|flac)$/i.test(f.name))){showError(t('WAV, MP3, FLAC 파일만 지원합니다.'));return;}if(list.some(f=>f.size>state.health.max_upload_mb*1024*1024)){showError(t('파일당 최대 {size}MB입니다.',{size:state.health.max_upload_mb}));return;}uploading=true;renderControls();let target=state.project,lastId,failure;try{if(!target)target=await post('/projects',{name:t('새 음악 프로젝트')});for(const file of list){const body=new FormData();body.append('file',file);const result=await api(`/projects/${target.id}/tracks`,{method:'POST',body});lastId=result.track.id;}}catch(e){failure=e.message;}finally{uploading=false;$('#audio-upload').value='';}if(target){if(failure)sessionStorage.setItem('mas-page-error',failure);location.assign(`/workspace?project=${target.id}${lastId?'&source='+lastId:''}`);}else{showError(failure);renderControls();}}
-function showReport(report){state.report=report;$('#report-output').classList.remove('report-placeholder');$('#report-output').innerHTML=`<div class="report-content"><div class="report-meta"><span class="small-badge">${esc(report.kind==='ai'?t('AI 분석 · ')+report.model:t('측정 기반 · AI 미사용'))}</span><span>${esc(new Date(report.created_at).toLocaleString(locale))}</span></div><article class="markdown-body"></article><details><summary>${esc(t('측정 근거 JSON'))}</summary><pre class="report-evidence"></pre></details></div>`;if(report.content_html)$('.markdown-body').innerHTML=report.content_html;else $('.markdown-body').textContent=report.content;$('.report-evidence').textContent=JSON.stringify(report.evidence,null,2);$('#export-report').hidden=false;}
+function renderSections(){
+  const select=$('#report-section');if(!select)return;
+  const sections=source()?.sections||[],stamp=JSON.stringify(sections);
+  if(stamp!==sectionSignature){const old=select.value;select.innerHTML=`<option value="manual">${esc(t('직접 지정'))}</option><option value="whole">${esc(t('곡 전체'))}</option>`+sections.map(v=>`<option value="${esc(v.id)}">${esc(v.name)} · ${fmt(v.start)}–${fmt(v.end)}</option>`).join('');select.value=[...select.options].some(o=>o.value===old)?old:'manual';sectionSignature=stamp;}
+  $('[data-action="delete-section"]').disabled=busy()||!sections.some(v=>v.id===select.value);
+  $('[data-action="save-section"]').disabled=busy()||!source()?.duration;
+}
+function showReportView(view){
+  const report=state.report,article=$('#report-output .markdown-body');if(!article||!report)return;
+  if(report.views_html?.[view])article.innerHTML=report.views_html[view];
+  else if(report.content_html)article.innerHTML=report.content_html;else article.textContent=report.content;
+  $$('#report-output [data-action="report-view"]').forEach(b=>pressed(b,b.dataset.view===view));
+}
+function showReport(report){
+  state.report=report;const host=$('#report-output');host.classList.remove('report-placeholder');
+  const labels={integrated:t('통합 결과'),full_mix:t('전체 음악'),vocals:t('보컬'),instrumental:t('반주')};
+  const cards=(report.scoring?.sources||[]).map(score=>{
+    const name=report.evidence?.find(e=>e.source_id===score.source_id)?.name||score.source_id;
+    return `<section class="score-card"><div><strong>${esc(name)}</strong><span class="score-total">${score.overall===null?esc(t('판단 보류')):Number(score.overall).toFixed(1)+'<small> / 10</small>'}</span></div>`+score.dimensions.map(d=>`<div class="score-dimension"><span>${esc(locale.startsWith('en')?d.label_en:d.label_ko)} <small>${Math.round(d.weight*100)}%</small></span><meter min="0" max="10" value="${d.value===null?0:Number(d.value)}" aria-label="${esc(locale.startsWith('en')?d.label_en:d.label_ko)}" ${d.value===null?'hidden':''}></meter><strong>${d.value===null?esc(t('판단 보류')):Number(d.value).toFixed(1)}</strong></div>`).join('')+`<p class="tiny muted">${esc(t('선택 구간의 AI 추정 평가 · 검증된 실력 점수가 아닙니다.'))}</p></section>`;
+  }).join('');
+  const tabs=Object.keys(report.views_html||{}).length?`<nav class="report-tabs" aria-label="${esc(t('분석 결과 보기'))}">${Object.entries(labels).map(([view,label])=>`<button class="chip" data-action="report-view" data-view="${view}" aria-pressed="false">${esc(label)}</button>`).join('')}</nav>`:'';
+  host.innerHTML=`<div class="report-content"><div class="report-meta"><span class="small-badge">${esc(report.kind==='ai'?t('AI 분석 · ')+report.model:t('측정 기반 · AI 미사용'))}</span><span>${esc(new Date(report.created_at).toLocaleString(locale))}</span></div><div class="score-cards">${cards}</div>${tabs}<article class="markdown-body"></article><details><summary>${esc(t('분석 근거와 모델 원본 JSON'))}</summary><pre class="report-evidence"></pre></details></div>`;
+  showReportView('integrated');host.querySelector('.report-evidence').textContent=JSON.stringify({dsp:report.evidence,listening:report.audio_analyses,llm:report.raw_llm_responses,scoring:report.scoring},null,2);$('#export-report').hidden=false;
+}
 async function syncReportQueue(){
   const queue=state.report_queue,panel=$('#report-queue-panel'),key=JSON.stringify(queue.jobs);
   panel.hidden=!queue.busy;
@@ -129,7 +154,7 @@ async function syncReportQueue(){
 }
 async function makeReport(ai,enqueue){
   if(reportSubmitting)return;reportSubmitting=true;renderControls();
-  try{const compare=$('#report-scope').value==='project';const data={start:player.start,end:player.end||source().duration,ai,enqueue,source_ids:compare?sources().map(s=>s.id):[source().id],vocal_id:compare?null:vocal().id};
+  try{const compare=$('#report-scope').value==='project';const data={start:player.start,end:player.end||source().duration,ai,enqueue,source_ids:compare?sources().map(s=>s.id):[source().id],vocal_id:compare?null:vocal().id,section_label:(source()?.sections||[]).find(v=>v.id===$('#report-section')?.value)?.name||''};
     const job=await post(`/projects/${state.project.id}/reports`,data);
     notify(job.reused?t('이미 접수된 동일한 분석입니다.'):enqueue?t('분석 대기열에 추가했습니다.'):t('분석 요청을 접수했습니다.'));
     await refresh();
@@ -154,6 +179,9 @@ case 'chart-kind':state.chartKind=b.dataset.kind;$$('[data-action="chart-kind"]'
 case 'transform':$('#transform-form').reset();$('#semitones-label').textContent=t('0 반음');$('#transform-speed-label').textContent='1.00×';openModal('transform');break;
 case 'delete-project':case 'delete-source':deleteTarget={type:action==='delete-project'?'project':'source',id};$('#delete-description').textContent=t('“{name}”의 원본과 모든 분리 트랙·분석 결과를 삭제합니다. 복구할 수 없습니다.',{name:b.dataset.name});openModal('delete');break;
 case 'confirm-delete':b.disabled=true;try{await api(deleteTarget.type==='project'?`/projects/${deleteTarget.id}`:`/projects/${state.project.id}/tracks/${deleteTarget.id}`,{method:'DELETE'});location.assign(deleteTarget.type==='project'?'/dashboard':`/workspace?project=${state.project.id}`);}finally{b.disabled=false;}break;
+case 'save-section':{const start=Number($('#range-start').value),end=Number($('#range-end').value),name=$('#section-name').value.trim();if(!name)throw new Error(t('구간 이름을 입력하세요.'));const saved=await post(`/projects/${state.project.id}/tracks/${source().id}/sections`,{name,start,end});source().sections=[...(source().sections||[]),saved].sort((a,b)=>a.start-b.start);renderSections();$('#report-section').value=saved.id;await refresh();renderSections();break;}
+case 'delete-section':await api(`/projects/${state.project.id}/tracks/${source().id}/sections/${$('#report-section').value}`,{method:'DELETE'});await refresh();renderSections();break;
+case 'report-view':showReportView(b.dataset.view);break;
 case 'generate-report':await makeReport(b.dataset.ai==='true',b.dataset.enqueue==='true');break;
 case 'export-report':if(state.report){const url=URL.createObjectURL(new Blob([JSON.stringify(state.report,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='mas-report.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}break;
 case 'vibrato':{const v=state.analyses[vocal().id].vibrato_candidates[Number(b.dataset.index)];$('#range-start').value=v.start;$('#range-end').value=v.end;player.loop=true;syncRange();player.seek(v.start);renderAnalysis();break;}
@@ -165,7 +193,7 @@ $('#transform-form').addEventListener('submit',async e=>{e.preventDefault();e.su
 $('#audio-upload').addEventListener('change',e=>void uploadFiles(e.target.files));
 $('#upload-zone')?.addEventListener('dragover',e=>{e.preventDefault();$('#upload-zone').classList.add('dragging');});$('#upload-zone')?.addEventListener('dragleave',()=>$('#upload-zone').classList.remove('dragging'));$('#upload-zone')?.addEventListener('drop',e=>{e.preventDefault();$('#upload-zone').classList.remove('dragging');void uploadFiles(e.dataTransfer.files);});
 document.addEventListener('input',e=>{const el=e.target;if(el.dataset.volume){player.mixFor(el.dataset.volume).volume=Number(el.value);player.applyMix();$(`[data-volume-label="${el.dataset.volume}"]`).textContent=Math.round(Number(el.value)*100)+'%';}if(el.dataset.waveSeek)player.seek(Number(el.value));if(el.id==='transport-seek')player.seek(Number(el.value));if(el.id==='project-search')$$('[data-project-name]').forEach(card=>card.hidden=!card.dataset.projectName.toLocaleLowerCase().includes(el.value.toLocaleLowerCase()));if(el.name==='semitones')$('#semitones-label').textContent=t('{value} 반음',{value:(Number(el.value)>0?'+':'')+el.value});if(el.name==='speed')$('#transform-speed-label').textContent=Number(el.value).toFixed(2)+'×';});
-document.addEventListener('change',async e=>{const el=e.target;try{if(el.id==='playback-speed')player.setSpeed(Number(el.value));if(el.id==='analysis-track'){state.vocalId=el.value;renderControls();renderAnalysis();if(state.enabled)await analyze();}if(el.id==='compare-vocals')renderAnalysis();if(el.id==='source-offset'){await api(`/projects/${state.project.id}/tracks/${source().id}`,{method:'PATCH',body:JSON.stringify({offset:Number(el.value)})});await refresh();}if(el.id==='range-start'||el.id==='range-end'){if(Number($('#range-end').value)<=Number($('#range-start').value)){showError(t('구간 끝은 시작보다 커야 합니다.'));return;}syncRange();renderAnalysis();}if(el.id==='report-history'&&el.value!==''){const r=await api(`/projects/${state.project.id}/reports/${Number(el.value)}`);showReport(r);}}catch(error){showError(error.message);}});
+document.addEventListener('change',async e=>{const el=e.target;try{if(el.id==='report-scope')renderControls();if(el.id==='playback-speed')player.setSpeed(Number(el.value));if(el.id==='analysis-track'){state.vocalId=el.value;renderControls();renderAnalysis();if(state.enabled)await analyze();}if(el.id==='compare-vocals')renderAnalysis();if(el.id==='source-offset'){await api(`/projects/${state.project.id}/tracks/${source().id}`,{method:'PATCH',body:JSON.stringify({offset:Number(el.value)})});await refresh();}if(el.id==='report-section'){const section=(source()?.sections||[]).find(v=>v.id===el.value);if(el.value==='whole'||section){$('#range-start').value=section?section.start:0;$('#range-end').value=section?section.end:source().duration;syncRange();renderAnalysis();}renderSections();}if(el.id==='range-start'||el.id==='range-end'){if($('#report-section'))$('#report-section').value='manual';renderSections();if(Number($('#range-end').value)<=Number($('#range-start').value)){showError(t('구간 끝은 시작보다 커야 합니다.'));return;}syncRange();renderAnalysis();}if(el.id==='report-history'&&el.value!==''){const r=await api(`/projects/${state.project.id}/reports/${Number(el.value)}`);showReport(r);}}catch(error){showError(error.message);}});
 window.addEventListener('pagehide',()=>player.destroy());window.addEventListener('pageshow',e=>{if(e.persisted){player.setTracks(state.project?.id,playbackTracks());renderControls();}});
 player.setTracks(state.project?.id,state.page==='workspace'?playbackTracks():[]);renderControls();renderAnalysis();renderHistory();
 const pendingError=sessionStorage.getItem('mas-page-error');if(pendingError){showError(pendingError);sessionStorage.removeItem('mas-page-error');}

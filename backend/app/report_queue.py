@@ -12,6 +12,7 @@ from .markdown import render_markdown
 from .reports import ai_report, measured_report
 from .ai_provider import AIError, Provider, redact
 from .music_ai import PIPELINE_VERSION, audio_inputs, listen
+from .music_evaluation import RUBRIC_VERSION
 
 log = logging.getLogger(__name__)
 PENDING = {"queued", "processing"}
@@ -30,7 +31,7 @@ class ReportQueue:
 
     def _provider_signature(self):
         s = self.settings
-        return sha256(json.dumps([PIPELINE_VERSION, s.audio_ai_url, s.audio_ai_model, s.audio_ai_api_key,
+        return sha256(json.dumps([PIPELINE_VERSION, RUBRIC_VERSION, s.audio_ai_url, s.audio_ai_model, s.audio_ai_api_key,
                                   s.llm_ai_url, s.llm_ai_model, s.llm_ai_api_key,
                                   s.audio_clip_seconds, s.audio_max_tokens, s.llm_max_tokens]).encode()).hexdigest()
 
@@ -104,15 +105,18 @@ class ReportQueue:
             if not job:
                 raise HTTPException(404, "작업 정보를 찾을 수 없습니다.")
             result = {k: deepcopy(v) for k, v in job.items()
-                      if k not in {"evidence", "audio_inputs", "audio_analyses", "fingerprint", "provider_signature", "start", "end", "result"}}
+                      if k not in {"evidence", "audio_inputs", "audio_analyses", "llm_analyses", "fingerprint", "provider_signature", "start", "end", "result"}}
             waiting = sorted((j for j in self.jobs.values() if j["status"] == "queued"),
                              key=lambda j: j["created_at"])
             result["queue_position"] = next((i + 1 for i, j in enumerate(waiting) if j["id"] == job_id), 0)
             if include_result and job.get("result"):
                 result["result"] = deepcopy(job["result"])
                 result["result"]["content_html"] = render_markdown(result["result"]["content"])
+                result["result"]["views_html"] = {k: render_markdown(v) for k, v in result["result"].get("views", {}).items()}
             if include_result and job.get("audio_analyses") and not job.get("result"):
                 result["partial_audio_analyses"] = deepcopy(job["audio_analyses"])
+            if include_result and job.get("llm_analyses") and not job.get("result"):
+                result["partial_llm_analyses"] = deepcopy(job["llm_analyses"])
             return result
 
     def snapshot(self, project_ids=None):
@@ -164,7 +168,14 @@ class ReportQueue:
                 with self.lock:
                     self._update(job, stage="interpreting", validation=deepcopy(validation),
                                  message="gpt-oss 최종 보고서 생성 중")
-                completion = ai_report(self.settings, job["evidence"], audio_analyses=observations, **options)
+                def save_llm_stage(stage, values):
+                    with self.lock:
+                        stages = {**job.get("llm_analyses", {}), stage: deepcopy(values)}
+                        self._update(job, stage="llm_" + stage, llm_analyses=stages,
+                                     message={"full_mix": "gpt-oss 전체 음악 해석 중", "vocals": "gpt-oss 보컬 해석 중",
+                                              "instrumental": "gpt-oss 반주 해석 중", "integrated": "gpt-oss 통합 비교·점수 생성 중"}[stage])
+                completion = ai_report(self.settings, job["evidence"], audio_analyses=observations,
+                                       on_stage=save_llm_stage, **options)
                 content = completion["content"]
                 validation["LLM"]["text_generation_verified"] = True
             else:
@@ -175,13 +186,21 @@ class ReportQueue:
             if job["kind"] == "ai":
                 result.update(pipeline_version=PIPELINE_VERSION, audio_model=job["audio_model"],
                               audio_analyses=observations, validation=validation, expert_feedback=[],
-                              llm_response={k: v for k, v in completion.items() if k != "content"})
+                              llm_response={k: v for k, v in completion.items() if k in {"model", "response_id", "usage", "finish_reason"}})
+                for key in ("views", "category_analyses", "integrated_analysis", "scoring", "raw_llm_responses"):
+                    if key in completion:
+                        result[key] = completion[key]
             with self.lock:
                 project = self.store.get(job["project_id"])
                 if project is not None:
-                    project["reports"] = (project.get("reports", []) + [result])[-10:]
+                    # Canonical raw model responses live in report_jobs. Avoid copying long
+                    # audio/model payloads into every project poll and Mongo's project document.
+                    preview = {k: v for k, v in result.items() if k not in {
+                        "audio_analyses", "raw_llm_responses", "category_analyses", "integrated_analysis"}}
+                    project["reports"] = (project.get("reports", []) + [preview])[-10:]
                     self.store.save(project)
-                self._update(job, status="done", progress=100, message="리포트 분석 완료", result=result)
+                self._update(job, status="done", progress=100, message="리포트 분석 완료", result=result,
+                             **({"validation": deepcopy(validation)} if job["kind"] == "ai" else {}))
         except Exception as exc:
             message = (redact(self.settings, exc) if isinstance(exc, AIError) else
                        "Unexpected analysis error; check server logs and selected audio files.")

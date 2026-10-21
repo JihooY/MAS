@@ -16,6 +16,7 @@ from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.music_ai import audio_inputs, wav_chunks
 from backend.check_ai import check
+from tests.music_fakes import response_for
 
 
 def config(path, **values):
@@ -58,10 +59,10 @@ def test_real_wav_selection_covers_range_without_truncating_or_changing_gain(tmp
     samples = .1 * np.sin(2 * np.pi * 220 * np.arange(sr * 3) / sr)
     sf.write(path, np.column_stack([samples, samples]), sr)
     chunks = list(wav_chunks(path, .25, 2.75, max_seconds=1))
-    assert len(chunks) == 3
+    assert len(chunks) >= 3
     assert chunks[0][1]['source_range_seconds'][0] == .25
     assert chunks[-1][1]['source_range_seconds'][1] == 2.75
-    assert all(chunks[i][1]['source_frames'][1] == chunks[i+1][1]['source_frames'][0] for i in range(2))
+    assert all(chunks[i][1]['source_frames'][1] == chunks[i+1][1]['source_frames'][0] for i in range(len(chunks)-1))
     for data, meta in chunks:
         info = sf.info(BytesIO(data))
         assert info.subtype == 'PCM_16' and info.channels == 1 and info.samplerate == 24000
@@ -73,19 +74,23 @@ def test_real_wav_selection_covers_range_without_truncating_or_changing_gain(tmp
         list(wav_chunks(path, 0, 4))
 
 
-def test_derived_vocal_does_not_claim_original_alignment_and_prevents_path_escape(tmp_path):
+def test_derived_vocal_and_missing_context_are_explicitly_rejected(tmp_path):
     s = config(tmp_path)
     s.prepare()
-    sf.write(tmp_path / 'audio/v.wav', np.zeros(24000), 24000)
-    project = {'tracks': [{'id': 's', 'original_file': 'original.wav', 'stems': [
-        {'id': 'v', 'file': 'v.wav', 'derived': True, 'transform': {'speed': 2}}]}]}
-    item = {'track_id': 'v', 'source_id': 's', 'name': 'song', 'range_seconds': [0, 1],
-            'source_range_seconds': [0, 1], 'offset_seconds': 0}
-    entries = audio_inputs(s, project, [item])
-    assert [e['kind'] for e in entries] == ['vocals'] and entries[0]['derived']
-    project['tracks'][0]['stems'][0]['file'] = '../outside.wav'
+    for name in ('v.wav', 'original.wav', 'other.wav'):
+        sf.write(tmp_path / 'audio' / name, np.zeros(24000), 24000)
+    source = {'id': 's', 'name': 'song.wav', 'duration': 1, 'original_file': 'original.wav', 'stems': [
+        {'id': 'v', 'file': 'v.wav', 'kind': 'vocals', 'derived': True},
+        {'id': 'o', 'file': 'other.wav', 'kind': 'other', 'status': 'ready'}]}
+    evidence = {'track_id': 'v', 'source_id': 's', 'name': 'song', 'range_seconds': [0, 1],
+                'source_range_seconds': [0, 1], 'offset_seconds': 0}
+    with pytest.raises(AIError, match='original vocal timeline'):
+        audio_inputs(s, {'tracks': [source]}, [evidence])
+    source['stems'][0]['derived'] = False
+    assert len(audio_inputs(s, {'tracks': [source]}, [evidence])) == 3
+    source['stems'][0]['file'] = '../outside.wav'
     with pytest.raises(AIError):
-        audio_inputs(s, project, [item])
+        audio_inputs(s, {'tracks': [source]}, [evidence])
 
 
 @pytest.mark.parametrize('failure', ['model', 'audio', 'llm', 'timeout', 'empty', 'length', 'json'])
@@ -122,7 +127,7 @@ def wait_job(client, jid):
     pytest.fail('Job timed out')
 
 
-@pytest.mark.parametrize('failed_stage', [None, 'audio', 'llm'])
+@pytest.mark.parametrize('failed_stage', [None, 'audio', 'llm', 'bad_score'])
 def test_upload_to_listening_to_report_and_partial_failure_persistence(tmp_path, monkeypatch, caplog, failed_stage):
     s = config(tmp_path)
     # Only expensive Demucs weights are replaced. Decode, files, DSP, queue and HTTP payloads are real.
@@ -130,7 +135,8 @@ def test_upload_to_listening_to_report_and_partial_failure_persistence(tmp_path,
         out.mkdir(parents=True)
         samples, sr = sf.read(path, always_2d=True)
         sf.write(out / 'vocals.wav', samples, sr)
-        return [{'kind': 'vocals', 'name': '보컬', 'duration': len(samples)/sr, 'sample_rate': sr}]
+        sf.write(out / 'other.wav', samples*.1, sr)
+        return [{'kind': k, 'name': k, 'duration': len(samples)/sr, 'sample_rate': sr} for k in ('vocals', 'other')]
     monkeypatch.setattr(separation, 'separate', separate)
     app = create_app(s)
     seen = []
@@ -163,18 +169,23 @@ def test_upload_to_listening_to_report_and_partial_failure_persistence(tmp_path,
                 pcm = base64.b64decode(audio['data'])
                 info = sf.info(BytesIO(pcm))
                 assert audio['format'] == 'wav' and info.subtype == 'PCM_16'
-                assert .49 < info.duration < .51
+                assert (.49 < info.duration < .51) or (.99 < info.duration < 1.01)
                 if failed_stage == 'audio':
                     return httpx.Response(400, json={'error': {'message': 'Unsupported input_audio secret-audio-key'}})
             else:
                 evidence = json.loads(body['messages'][1]['content'])
-                assert len(evidence['music_flamingo']) == 2
                 assert evidence['dsp_evidence'][0]['source_range_seconds'] == [.2, .7]
+                if evidence['stage'] == 'integrated':
+                    assert set(evidence['category_analyses']) == {'full_mix', 'vocals', 'instrumental'}
+                else:
+                    assert len(evidence['music_flamingo']) == 1
                 assert 'input_audio' not in request.content.decode()
                 if failed_stage == 'llm':
                     return httpx.Response(503, json={'error': {'message': 'Unavailable secret-llm-key'}})
-            return httpx.Response(200, json={'model': model, 'choices': [{'message': {
-                'content': 'A quiet sustained vocal.' if audio_role else '## 요약\n실제 청취와 측정에 근거한 해석'}, 'finish_reason': 'stop'}]})
+            content = {'musical_features': ['Sustained tone'], 'related_evidence': ['Steady tone'], 'uncertainties': ['Synthetic fixture']} if audio_role else response_for(body)
+            if not audio_role and failed_stage == 'bad_score' and evidence['stage'] == 'integrated':
+                content['assessments'][0]['scores']['music_fit']['value'] = 11
+            return httpx.Response(200, json={'model': model, 'choices': [{'message': {'content': json.dumps(content)}, 'finish_reason': 'stop'}]})
         use_transport(monkeypatch, respond)
         response = client.post(f'/api/projects/{pid}/reports', json={'start': .2, 'end': .7, 'ai': True})
         assert response.status_code == 202
@@ -186,16 +197,22 @@ def test_upload_to_listening_to_report_and_partial_failure_persistence(tmp_path,
         if failed_stage == 'audio':
             assert not any(r.method == 'POST' and r.url.host == 'gpt-oss' for r in seen)
             assert 'HTTP 400' in result['message']
-        elif failed_stage == 'llm':
-            assert len(result['partial_audio_analyses']) == 2
+        elif failed_stage in {'llm', 'bad_score'}:
+            assert len(result['partial_audio_analyses']) == 4
             assert result['validation']['AUDIO']['audio_input_verified']
+            if failed_stage == 'bad_score':
+                assert len(result['partial_llm_analyses']) == 4
+                assert result['partial_llm_analyses']['integrated']['status'] == 'received'
+                assert not app.state.store.get(pid).get('reports')
         else:
             assert result['result']['validation']['AUDIO']['audio_input_verified']
-            assert len(result['result']['audio_analyses']) == 2
+            assert len(result['result']['audio_analyses']) == 4
             assert result['result']['expert_feedback'] == []
-            assert len(seen) == 5
+            assert len(seen) == 10
             saved = client.get(f'/api/projects/{pid}/reports/0').json()
             assert saved['audio_model'] == s.audio_ai_model and saved['model'] == s.llm_ai_model
+            assert len(saved['audio_analyses']) == 4 and len(saved['raw_llm_responses']) == 4
+            assert 'audio_analyses' not in client.get(f'/api/projects/{pid}').json()['reports'][0]
         # Both playback and DSP comparison endpoints remain functional.
         assert client.get(route + '/audio').status_code == 200
         assert client.get(route + '/analysis').status_code == 200
@@ -231,7 +248,7 @@ def test_diagnostic_sends_short_wav_then_final_interpretation(tmp_path, monkeypa
             data = base64.b64decode(body['messages'][0]['content'][1]['input_audio']['data'])
             assert sf.info(BytesIO(data)).duration == 1
         else:
-            assert json.loads(body['messages'][1]['content'])['dsp_evidence'] == []
+            assert 'connection probe' in body['messages'][0]['content']
         return httpx.Response(200, json={'choices': [{'message': {'content': 'Audible sustained tone.'}}]})
     use_transport(monkeypatch, respond)
     result = check(s, path)

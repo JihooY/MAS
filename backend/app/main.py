@@ -54,6 +54,13 @@ class ReportInput(BaseModel):
     enqueue: bool = False
     source_ids: list[str] | None = None
     vocal_id: str | None = None
+    section_label: str = Field(default="", max_length=80)
+
+
+class SectionInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
 
 
 class SeparationInput(BaseModel):
@@ -452,6 +459,35 @@ def create_app(settings=None):
         update_track(pid, tid, offset=data.offset)
         return track_or_404(pid, tid)[1]
 
+    @app.post("/api/projects/{pid}/tracks/{tid}/sections", status_code=201)
+    def save_section(pid: str, tid: str, data: SectionInput):
+        with store.lock:
+            p, source = track_or_404(pid, tid)
+            if busy(p):
+                raise HTTPException(409, "작업 완료 후 구간을 변경하세요.")
+            if not data.name.strip() or data.end-data.start < .2 - 1e-6 or data.end > source.get("duration", 0):
+                raise HTTPException(422, "음원 범위 안에서 이름과 0.2초 이상의 구간을 지정하세요.")
+            if len(source.get("sections", [])) >= 24:
+                raise HTTPException(409, "음원당 구간은 최대 24개까지 저장할 수 있습니다.")
+            section = {"id": uuid4().hex, **data.model_dump(), "name": data.name.strip(), "origin": "manual"}
+            source.setdefault("sections", []).append(section)
+            source["sections"].sort(key=lambda v: (v["start"], v["end"]))
+            p["updated_at"] = now()
+            store.save(p)
+            return section
+
+    @app.delete("/api/projects/{pid}/tracks/{tid}/sections/{section_id}", status_code=204)
+    def delete_section(pid: str, tid: str, section_id: str):
+        with store.lock:
+            p, source = track_or_404(pid, tid)
+            if busy(p):
+                raise HTTPException(409, "작업 완료 후 구간을 변경하세요.")
+            if not any(v["id"] == section_id for v in source.get("sections", [])):
+                raise HTTPException(404, "저장된 구간이 없습니다.")
+            source["sections"] = [v for v in source["sections"] if v["id"] != section_id]
+            p["updated_at"] = now()
+            store.save(p)
+
     @app.delete("/api/projects/{pid}/tracks/{tid}", status_code=204)
     def delete_track(pid: str, tid: str):
         with store.lock:
@@ -561,7 +597,12 @@ def create_app(settings=None):
         if index < 0 or index >= len(reports):
             raise HTTPException(404, "리포트가 없습니다.")
         report = dict(reports[index])
+        if report.get("job_id") in report_queue.jobs:
+            canonical = report_queue.get(report["job_id"]).get("result")
+            if canonical:
+                report = canonical
         report["content_html"] = render_markdown(report["content"])
+        report["views_html"] = {k: render_markdown(v) for k, v in report.get("views", {}).items()}
         return report
 
     @app.post("/api/projects/{pid}/reports", status_code=202)
@@ -588,8 +629,13 @@ def create_app(settings=None):
             analyses = {v["id"]: json.loads(analysis_path(v).read_text(encoding="utf-8"))
                         for v in vocals if analysis_path(v).is_file()}
             items = evidence(vocals, analyses, data.start, data.end)
+            for item in items:
+                item["section_label"] = data.section_label
+                item["evidence_id"] = f"dsp:{item['track_id']}"
             if not items:
                 raise HTTPException(409, "선택 구간에 분석 데이터가 없습니다.")
+            if data.ai and data.source_ids and set(data.source_ids) != {i["source_id"] for i in items}:
+                raise HTTPException(409, "선택한 모든 음원의 기본 보컬 분석과 비교 구간을 확인하세요.")
             if data.source_ids and len(data.source_ids) > 1 and len(items) < 2:
                 raise HTTPException(409, "비교하려면 최소 두 음원의 보컬 분석을 완료하세요.")
             if data.ai and not configured(s):

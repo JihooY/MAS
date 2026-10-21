@@ -12,7 +12,6 @@ import soundfile as sf
 from .app.ai_provider import AIError, Provider, redact
 from .app.config import Settings
 from .app.music_ai import listen, wav_chunks
-from .app.reports import ai_report
 
 
 def check(settings, audio=None):
@@ -50,8 +49,11 @@ def check(settings, audio=None):
                                     "source_range_seconds": [0, end], "observations": observations}
             if result["providers"]["LLM"]["status"] == "ok":
                 try:
-                    completion = ai_report(settings, [], audio_analyses=observations)
-                    result["llm_test"] = {"status": "ok", **completion}
+                    completion = Provider.from_settings(settings, "LLM").complete(settings, [
+                        {"role": "system", "content": "Summarize these Music Flamingo observations in Korean. This is a Full Mix connection probe only; do not score vocals or claim a three-way analysis."},
+                        {"role": "user", "content": json.dumps(observations, ensure_ascii=False)},
+                    ], settings.llm_max_tokens)
+                    result["llm_test"] = {"status": "ok", "three_way_pipeline_verified": False, **completion}
                 except AIError as exc:
                     message = redact(settings, exc)
                     logging.error("LLM probe: %s", message)
